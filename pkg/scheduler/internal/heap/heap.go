@@ -69,6 +69,7 @@ func (h *data) Less(i, j int) bool {
 	if i > len(h.queue) || j > len(h.queue) {
 		return false
 	}
+	// 取出两个item, 调用<lessFunc>比较
 	itemi, ok := h.items[h.queue[i]]
 	if !ok {
 		return false
@@ -86,7 +87,9 @@ func (h *data) Len() int { return len(h.queue) }
 // Swap implements swapping of two elements in the heap. This is a part of standard
 // heap interface and should never be called directly.
 func (h *data) Swap(i, j int) {
+	// queue中的交换
 	h.queue[i], h.queue[j] = h.queue[j], h.queue[i]
+	// item中对应index的设置
 	item := h.items[h.queue[i]]
 	item.index = i
 	item = h.items[h.queue[j]]
@@ -96,6 +99,7 @@ func (h *data) Swap(i, j int) {
 // Push is supposed to be called by heap.Push only.
 func (h *data) Push(kv interface{}) {
 	keyValue := kv.(*itemKeyValue)
+	// 插入到queue尾部
 	n := len(h.queue)
 	h.items[keyValue.key] = &heapItem{keyValue.obj, n}
 	h.queue = append(h.queue, keyValue.key)
@@ -103,6 +107,11 @@ func (h *data) Push(kv interface{}) {
 
 // Pop is supposed to be called by heap.Pop only.
 func (h *data) Pop() interface{} {
+	// 为什么这里取的是最后一个元素?
+	// 因为在Pop时, heap算法会将 0,n两个位置的元素互换
+	// 所以这里用的是第n个元素pop
+
+	// 去掉queue最后一个元素, 得到其item
 	key := h.queue[len(h.queue)-1]
 	h.queue = h.queue[0 : len(h.queue)-1]
 	item, ok := h.items[key]
@@ -110,6 +119,7 @@ func (h *data) Pop() interface{} {
 		// This is an error
 		return nil
 	}
+	// items中删除对应项
 	delete(h.items, key)
 	return item.obj
 }
@@ -136,14 +146,18 @@ type Heap struct {
 // Add inserts an item, and puts it in the queue. The item is updated if it
 // already exists.
 func (h *Heap) Add(obj interface{}) error {
+	// 计算key
 	key, err := h.data.keyFunc(obj)
 	if err != nil {
 		return cache.KeyError{Obj: obj, Err: err}
 	}
+	// 判断item是否存在, 执行对应Add操作
 	if _, exists := h.data.items[key]; exists {
 		h.data.items[key].obj = obj
+		// 重新整理heap
 		heap.Fix(h.data, h.data.items[key].index)
 	} else {
+		// 加入到heap
 		heap.Push(h.data, &itemKeyValue{key, obj})
 		if h.metricRecorder != nil {
 			h.metricRecorder.Inc()

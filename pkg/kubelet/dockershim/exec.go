@@ -68,6 +68,7 @@ func (*NativeExecHandler) ExecInContainer(ctx context.Context, client libdocker.
 	done := make(chan struct{})
 	defer close(done)
 
+	// 调用 [client].CreateExec() 创建 exec
 	createOpts := dockertypes.ExecConfig{
 		Cmd:          cmd,
 		AttachStdin:  stdin != nil,
@@ -80,6 +81,8 @@ func (*NativeExecHandler) ExecInContainer(ctx context.Context, client libdocker.
 		return fmt.Errorf("failed to exec in container - Exec setup failed - %v", err)
 	}
 
+	// 运行旁路 goroutine, 用于能够调整 exec tty size
+	// 当然, 要等到 execObj 运行起来
 	// Have to start this before the call to client.StartExec because client.StartExec is a blocking
 	// call :-( Otherwise, resize events don't get processed and the terminal never resizes.
 	//
@@ -100,6 +103,7 @@ func (*NativeExecHandler) ExecInContainer(ctx context.Context, client libdocker.
 		})
 	}()
 
+	// 启动 exec, 设置其 stdin stdout stderr
 	startOpts := dockertypes.ExecStartCheck{Detach: false, Tty: tty}
 	streamOpts := libdocker.StreamOptions{
 		InputStream:  stdin,

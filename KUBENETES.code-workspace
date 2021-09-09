@@ -1,0 +1,28 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "staging/src/k8s.io/apimachinery"
+		},
+		{
+			"path": "staging/src/k8s.io/api"
+		},
+		{
+			"path": "staging/src/k8s.io/apiextensions-apiserver"
+		},
+		{
+			"path": "staging/src/k8s.io/client-go"
+		}
+	],
+	"settings": {
+		"go.lintOnSave": "file",
+		"[go]": {
+			"editor.formatOnSave": false,
+			"editor.codeActionsOnSave": {
+				"source.organizeImports": false,
+			},
+		},
+	}
+}

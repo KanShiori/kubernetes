@@ -28,13 +28,18 @@ import (
 
 // PullImage pulls an image from the network to local storage using the supplied
 // secrets if necessary.
-func (m *kubeGenericRuntimeManager) PullImage(image kubecontainer.ImageSpec, pullSecrets []v1.Secret, podSandboxConfig *runtimeapi.PodSandboxConfig) (string, error) {
+func (m *kubeGenericRuntimeManager) PullImage(image kubecontainer.ImageSpec,
+	pullSecrets []v1.Secret,
+	podSandboxConfig *runtimeapi.PodSandboxConfig) (string, error) {
+
+	// 从img命名中解析出对应的repo tag digest
 	img := image.Image
 	repoToPull, _, _, err := parsers.ParseImageName(img)
 	if err != nil {
 		return "", err
 	}
 
+	// 一些secret相关的
 	keyring, err := credentialprovidersecrets.MakeDockerKeyring(pullSecrets, m.keyring)
 	if err != nil {
 		return "", err
@@ -96,12 +101,14 @@ func (m *kubeGenericRuntimeManager) GetImageRef(image kubecontainer.ImageSpec) (
 func (m *kubeGenericRuntimeManager) ListImages() ([]kubecontainer.Image, error) {
 	var images []kubecontainer.Image
 
+	// 调用imageService的ListImages()接口
 	allImages, err := m.imageService.ListImages(nil)
 	if err != nil {
 		klog.ErrorS(err, "Failed to list images")
 		return nil, err
 	}
 
+	// 将所有的image信息转变为kubelet中的Image结构
 	for _, img := range allImages {
 		images = append(images, kubecontainer.Image{
 			ID:          img.Id,
@@ -131,11 +138,13 @@ func (m *kubeGenericRuntimeManager) RemoveImage(image kubecontainer.ImageSpec) e
 // this is a known issue, and we'll address this by getting imagefs stats directly from CRI.
 // TODO: Get imagefs stats directly from CRI.
 func (m *kubeGenericRuntimeManager) ImageStats() (*kubecontainer.ImageStats, error) {
+	// 得到所有image信息
 	allImages, err := m.imageService.ListImages(nil)
 	if err != nil {
 		klog.ErrorS(err, "Failed to list images")
 		return nil, err
 	}
+	// 求和所有image的size
 	stats := &kubecontainer.ImageStats{}
 	for _, img := range allImages {
 		stats.TotalStorageBytes += img.Size_

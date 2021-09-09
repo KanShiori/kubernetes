@@ -263,11 +263,14 @@ func NewProxier(ipt utiliptables.Interface,
 	healthzServer healthcheck.ProxierHealthUpdater,
 	nodePortAddresses []string,
 ) (*Proxier, error) {
+	// 通过 sysctl 配置 net.ipv4.conf.all.route_localnet = 1
+	// route_localnet 用于目标为 127.0.0.1 的包也会经过 FORWARD chain
 	// Set the route_localnet sysctl we need for
 	if err := utilproxy.EnsureSysctl(sysctl, sysctlRouteLocalnet, 1); err != nil {
 		return nil, err
 	}
 
+	// 检查 net.bridge.bridge-nf-call-iptables = 1 开启
 	// Proxy needs br_netfilter and bridge-nf-call-iptables=1 when containers
 	// are connected to a Linux bridge (but not SDN bridges).  Until most
 	// plugins handle this, log when config is missing
@@ -275,6 +278,8 @@ func NewProxier(ipt utiliptables.Interface,
 		klog.InfoS("Missing br-netfilter module or unset sysctl br-nf-call-iptables; proxy may not work as intended")
 	}
 
+	// 配置 masquerade mark, 默认为 0x00004000/0x00004000
+	// 用来标记 k8s 管理的报文，masqueradeBit 默认为 14
 	// Generate the masquerade mark to use for SNAT rules.
 	masqueradeValue := 1 << uint(masqueradeBit)
 	masqueradeMark := fmt.Sprintf("%#08x", masqueradeValue)

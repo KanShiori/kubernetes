@@ -88,7 +88,8 @@ func (pb *prober) recordContainerEvent(pod *v1.Pod, container *v1.Container, eve
 }
 
 // probe probes the container.
-func (pb *prober) probe(probeType probeType, pod *v1.Pod, status v1.PodStatus, container v1.Container, containerID kubecontainer.ContainerID) (results.Result, error) {
+func (pb *prober) probe(probeType probeType, pod *v1.Pod, status v1.PodStatus,
+	container v1.Container, containerID kubecontainer.ContainerID) (results.Result, error) {
 	var probeSpec *v1.Probe
 	switch probeType {
 	case readiness:
@@ -106,7 +107,9 @@ func (pb *prober) probe(probeType probeType, pod *v1.Pod, status v1.PodStatus, c
 		return results.Success, nil
 	}
 
-	result, output, err := pb.runProbeWithRetries(probeType, probeSpec, pod, status, container, containerID, maxProbeRetries)
+	// 执行probe并解析result
+	result, output, err := pb.runProbeWithRetries(probeType, probeSpec, pod, status,
+		container, containerID, maxProbeRetries)
 	if err != nil || (result != probe.Success && result != probe.Warning) {
 		// Probe failed in one way or another.
 		if err != nil {
@@ -152,13 +155,18 @@ func buildHeader(headerList []v1.HTTPHeader) http.Header {
 	return headers
 }
 
-func (pb *prober) runProbe(probeType probeType, p *v1.Probe, pod *v1.Pod, status v1.PodStatus, container v1.Container, containerID kubecontainer.ContainerID) (probe.Result, string, error) {
+// runProbe 执行真正的probe操作
+func (pb *prober) runProbe(probeType probeType, p *v1.Probe, pod *v1.Pod, status v1.PodStatus,
+	container v1.Container, containerID kubecontainer.ContainerID) (probe.Result, string, error) {
 	timeout := time.Duration(p.TimeoutSeconds) * time.Second
+	// 执行exec probe的cmd
 	if p.Exec != nil {
 		klog.V(4).InfoS("Exec-Probe runProbe", "pod", klog.KObj(pod), "containerName", container.Name, "execCommand", p.Exec.Command)
 		command := kubecontainer.ExpandContainerCommandOnlyStatic(p.Exec.Command, container.Env)
+		// 通过<exec>执行cmd probe
 		return pb.exec.Probe(pb.newExecInContainer(container, containerID, command, timeout))
 	}
+	// 执行http probe
 	if p.HTTPGet != nil {
 		scheme := strings.ToLower(string(p.HTTPGet.Scheme))
 		host := p.HTTPGet.Host
@@ -183,6 +191,7 @@ func (pb *prober) runProbe(probeType probeType, p *v1.Probe, pod *v1.Pod, status
 			return pb.readinessHTTP.Probe(url, headers, timeout)
 		}
 	}
+	// 执行tcp probe
 	if p.TCPSocket != nil {
 		port, err := extractPort(p.TCPSocket.Port, container)
 		if err != nil {

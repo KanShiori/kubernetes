@@ -77,6 +77,8 @@ func NewProxyServer(o *Options) (*ProxyServer, error) {
 	return newProxyServer(o.config, o.CleanupAndExit, o.master)
 }
 
+// newProxyServer 创建 ProxyServer 对象.
+// config 指定了启动配置, cleanupAndExit, master 为访问 apiserver 的url
 func newProxyServer(
 	config *proxyconfigapi.KubeProxyConfiguration,
 	cleanupAndExit bool,

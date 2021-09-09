@@ -22,11 +22,13 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// alwaysDeny 拒绝所有请求
+//
 // alwaysDeny all requests made to this function.
 func alwaysDeny(ar v1.AdmissionReview) *v1.AdmissionResponse {
 	klog.V(2).Info("calling always-deny")
 	reviewResponse := v1.AdmissionResponse{}
-	reviewResponse.Allowed = false
+	reviewResponse.Allowed = false // 返回 allowed 为 false 表明拒绝请求
 	reviewResponse.Result = &metav1.Status{Message: "this webhook denies all requests"}
 	return &reviewResponse
 }

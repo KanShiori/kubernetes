@@ -35,8 +35,11 @@ const (
 	]`
 )
 
+// admitPods 检查 Pod 的 image
+//
 // only allow pods to pull images from specific registry.
 func admitPods(ar v1.AdmissionReview) *v1.AdmissionResponse {
+	// 判断资源是否是 Pod
 	klog.V(2).Info("admitting pods")
 	podResource := metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
 	if ar.Request.Resource != podResource {
@@ -45,6 +48,7 @@ func admitPods(ar v1.AdmissionReview) *v1.AdmissionResponse {
 		return toV1AdmissionResponse(err)
 	}
 
+	// 解码，解析为 Pod
 	raw := ar.Request.Object.Raw
 	pod := corev1.Pod{}
 	deserializer := codecs.UniversalDeserializer()
@@ -79,6 +83,7 @@ func admitPods(ar v1.AdmissionReview) *v1.AdmissionResponse {
 	return &reviewResponse
 }
 
+// mutatePods 对请求进行修改，添加一个 container
 func mutatePods(ar v1.AdmissionReview) *v1.AdmissionResponse {
 	shouldPatchPod := func(pod *corev1.Pod) bool {
 		if pod.Name != "webhook-to-be-mutated" {
@@ -140,6 +145,8 @@ func applyPodPatch(ar v1.AdmissionReview, shouldPatchPod func(*corev1.Pod) bool,
 	return &reviewResponse
 }
 
+// denySpecificAttachment 检查 Pod attch 参数
+//
 // denySpecificAttachment denies `kubectl attach to-be-attached-pod -i -c=container1"
 // or equivalent client requests.
 func denySpecificAttachment(ar v1.AdmissionReview) *v1.AdmissionResponse {
@@ -147,18 +154,21 @@ func denySpecificAttachment(ar v1.AdmissionReview) *v1.AdmissionResponse {
 	if ar.Request.Name != "to-be-attached-pod" {
 		return &v1.AdmissionResponse{Allowed: true}
 	}
+	// 检查 Resource 为 Pod
 	podResource := metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
 	if e, a := podResource, ar.Request.Resource; e != a {
 		err := fmt.Errorf("expect resource to be %s, got %s", e, a)
 		klog.Error(err)
 		return toV1AdmissionResponse(err)
 	}
+	// 检查请求的 SubResource 为 attach
 	if e, a := "attach", ar.Request.SubResource; e != a {
 		err := fmt.Errorf("expect subresource to be %s, got %s", e, a)
 		klog.Error(err)
 		return toV1AdmissionResponse(err)
 	}
 
+	// 解码，转变为 PodAttachOptions
 	raw := ar.Request.Object.Raw
 	podAttachOptions := corev1.PodAttachOptions{}
 	deserializer := codecs.UniversalDeserializer()
@@ -166,6 +176,7 @@ func denySpecificAttachment(ar v1.AdmissionReview) *v1.AdmissionResponse {
 		klog.Error(err)
 		return toV1AdmissionResponse(err)
 	}
+	// validate
 	klog.V(2).Info(fmt.Sprintf("podAttachOptions=%#v\n", podAttachOptions))
 	if !podAttachOptions.Stdin || podAttachOptions.Container != "container1" {
 		return &v1.AdmissionResponse{Allowed: true}

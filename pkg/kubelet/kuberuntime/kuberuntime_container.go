@@ -975,6 +975,7 @@ func (m *kubeGenericRuntimeManager) removeContainerLog(containerID string) error
 }
 
 // DeleteContainer removes a container.
-func (m *kubeGenericRuntimeManager) DeleteContainer(containerID kubecontainer.ContainerID) error {
+func (m *kubeGenericRuntimeManager) DeleteContainer(
+	containerID kubecontainer.ContainerID) error {
 	return m.removeContainer(containerID.ID)
 }

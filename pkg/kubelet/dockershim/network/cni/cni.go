@@ -218,14 +218,19 @@ func getDefaultCNINetwork(confDir string, binDirs []string) (*cniNetwork, error)
 	return nil, fmt.Errorf("no valid networks found in %s", confDir)
 }
 
-func (plugin *cniNetworkPlugin) Init(host network.Host, hairpinMode kubeletconfig.HairpinMode, nonMasqueradeCIDR string, mtu int) error {
+func (plugin *cniNetworkPlugin) Init(host network.Host, hairpinMode kubeletconfig.HairpinMode,
+	nonMasqueradeCIDR string, mtu int) error {
+	// 平台依赖初始化
 	err := plugin.platformInit()
 	if err != nil {
 		return err
 	}
 
+	// 设定Host网络
 	plugin.host = host
 
+	// 执行 syncNetworkConfig(), 决定 <defaultNetwork>
+	// 周期性执行 syncNetworkConfig()
 	plugin.syncNetworkConfig()
 
 	// start a goroutine to sync network config from confDir periodically to detect network config updates in every 5 seconds
@@ -277,6 +282,7 @@ func (plugin *cniNetworkPlugin) Event(name string, details map[string]interface{
 	plugin.Lock()
 	defer plugin.Unlock()
 
+	// 读取对应 podCIDR值
 	podCIDR, ok := details[network.NET_PLUGIN_EVENT_POD_CIDR_CHANGE_DETAIL_CIDR].(string)
 	if !ok {
 		klog.InfoS("The event didn't contain pod CIDR", "event", network.NET_PLUGIN_EVENT_POD_CIDR_CHANGE)
@@ -288,6 +294,7 @@ func (plugin *cniNetworkPlugin) Event(name string, details map[string]interface{
 		return
 	}
 
+	// 赋值到<podCidr>
 	plugin.podCidr = podCIDR
 }
 
@@ -300,26 +307,33 @@ func (plugin *cniNetworkPlugin) Status() error {
 	return plugin.checkInitialized()
 }
 
-func (plugin *cniNetworkPlugin) SetUpPod(namespace string, name string, id kubecontainer.ContainerID, annotations, options map[string]string) error {
+func (plugin *cniNetworkPlugin) SetUpPod(namespace string, name string, id kubecontainer.ContainerID,
+	annotations, options map[string]string) error {
+	// 检查是否已经初始化
 	if err := plugin.checkInitialized(); err != nil {
 		return err
 	}
+
+	// 通过<host>.GetNetNS() 得到对应容器的 namespace路径
 	netnsPath, err := plugin.host.GetNetNS(id.ID)
 	if err != nil {
 		return fmt.Errorf("CNI failed to retrieve network namespace path: %v", err)
 	}
 
+	// 规定时间内, 调用 loNetwork的addToNetwork() 与 <defaultNetwork>的addToNetwork()
 	// Todo get the timeout from parent ctx
 	cniTimeoutCtx, cancelFunc := context.WithTimeout(context.Background(), network.CNITimeoutSec*time.Second)
 	defer cancelFunc()
 	// Windows doesn't have loNetwork. It comes only with Linux
 	if plugin.loNetwork != nil {
-		if _, err = plugin.addToNetwork(cniTimeoutCtx, plugin.loNetwork, name, namespace, id, netnsPath, annotations, options); err != nil {
+		if _, err = plugin.addToNetwork(cniTimeoutCtx, plugin.loNetwork,
+			name, namespace, id, netnsPath, annotations, options); err != nil {
 			return err
 		}
 	}
 
-	_, err = plugin.addToNetwork(cniTimeoutCtx, plugin.getDefaultNetwork(), name, namespace, id, netnsPath, annotations, options)
+	_, err = plugin.addToNetwork(cniTimeoutCtx, plugin.getDefaultNetwork(),
+		name, namespace, id, netnsPath, annotations, options)
 	return err
 }
 
@@ -334,6 +348,7 @@ func (plugin *cniNetworkPlugin) TearDownPod(namespace string, name string, id ku
 		klog.InfoS("CNI failed to retrieve network namespace path", "err", err)
 	}
 
+	// 规定时间内, 调用 loNetwork的deleteFromNetwork() 与 <defaultNetwork>的deleteFromNetwork()
 	// Todo get the timeout from parent ctx
 	cniTimeoutCtx, cancelFunc := context.WithTimeout(context.Background(), network.CNITimeoutSec*time.Second)
 	defer cancelFunc()
@@ -345,7 +360,8 @@ func (plugin *cniNetworkPlugin) TearDownPod(namespace string, name string, id ku
 		}
 	}
 
-	return plugin.deleteFromNetwork(cniTimeoutCtx, plugin.getDefaultNetwork(), name, namespace, id, netnsPath, nil)
+	return plugin.deleteFromNetwork(cniTimeoutCtx, plugin.getDefaultNetwork(),
+		name, namespace, id, netnsPath, nil)
 }
 
 func (plugin *cniNetworkPlugin) addToNetwork(ctx context.Context, network *cniNetwork, podName string, podNamespace string, podSandboxID kubecontainer.ContainerID, podNetnsPath string, annotations, options map[string]string) (cnitypes.Result, error) {
@@ -366,7 +382,10 @@ func (plugin *cniNetworkPlugin) addToNetwork(ctx context.Context, network *cniNe
 	return res, nil
 }
 
-func (plugin *cniNetworkPlugin) deleteFromNetwork(ctx context.Context, network *cniNetwork, podName string, podNamespace string, podSandboxID kubecontainer.ContainerID, podNetnsPath string, annotations map[string]string) error {
+func (plugin *cniNetworkPlugin) deleteFromNetwork(ctx context.Context, network *cniNetwork,
+	podName string, podNamespace string, podSandboxID kubecontainer.ContainerID, podNetnsPath string,
+	annotations map[string]string) error {
+	// 构建运行时的配置config
 	rt, err := plugin.buildCNIRuntimeConf(podName, podNamespace, podSandboxID, podNetnsPath, annotations, nil)
 	if err != nil {
 		klog.ErrorS(err, "Error deleting network when building cni runtime conf")

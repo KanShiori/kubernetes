@@ -233,6 +233,7 @@ func NewKubeGenericRuntimeManager(
 		return nil, err
 	}
 
+	// 检查type是否支持
 	// Only matching kubeRuntimeAPIVersion is supported now
 	// TODO: Runtime API machinery is under discussion at https://github.com/kubernetes/kubernetes/issues/28642
 	if typedVersion.Version != kubeRuntimeAPIVersion {
@@ -248,6 +249,7 @@ func NewKubeGenericRuntimeManager(
 		"version", typedVersion.RuntimeVersion,
 		"apiVersion", typedVersion.RuntimeApiVersion)
 
+	// 创建pod log的root目录, 默认为"/var/log/pods"
 	// If the container logs directory does not exist, create it.
 	// TODO: create podLogsRootDirectory at kubelet.go when kubelet is refactored to
 	// new runtime interface
@@ -270,6 +272,7 @@ func NewKubeGenericRuntimeManager(
 	}
 	kubeRuntimeManager.keyring = credentialprovider.NewDockerKeyring()
 
+	// 创建imagePuller, runner, containerGC, versionCache
 	kubeRuntimeManager.imagePuller = images.NewImageManager(
 		kubecontainer.FilterEventRecorder(recorder),
 		kubeRuntimeManager,
@@ -360,16 +363,21 @@ func (m *kubeGenericRuntimeManager) Status() (*kubecontainer.RuntimeStatus, erro
 // exited and dead containers (used for garbage collection).
 func (m *kubeGenericRuntimeManager) GetPods(all bool) ([]*kubecontainer.Pod, error) {
 	pods := make(map[kubetypes.UID]*kubecontainer.Pod)
+
+	// 通过runtimeService得到所有的sandbox
 	sandboxes, err := m.getKubeletSandboxes(all)
 	if err != nil {
 		return nil, err
 	}
+
+	// 遍历得到的sandbox, 将其转换为kubelet使用的Pod结构
 	for i := range sandboxes {
 		s := sandboxes[i]
 		if s.Metadata == nil {
 			klog.V(4).InfoS("Sandbox does not have metadata", "sandbox", s)
 			continue
 		}
+		// sandbox metadata的uid, name, namespace为pod的id, name, namespace
 		podUID := kubetypes.UID(s.Metadata.Uid)
 		if _, ok := pods[podUID]; !ok {
 			pods[podUID] = &kubecontainer.Pod{
@@ -378,6 +386,7 @@ func (m *kubeGenericRuntimeManager) GetPods(all bool) ([]*kubecontainer.Pod, err
 				Namespace: s.Metadata.Namespace,
 			}
 		}
+		// 将sanbox信息变为Container结构, 保存到对应Pod的Sandbox列表
 		p := pods[podUID]
 		converted, err := m.sandboxToKubeContainer(s)
 		if err != nil {
@@ -387,10 +396,12 @@ func (m *kubeGenericRuntimeManager) GetPods(all bool) ([]*kubecontainer.Pod, err
 		p.Sandboxes = append(p.Sandboxes, converted)
 	}
 
+	// 通过runtimeService得到所有的Container(ListContainer接口)
 	containers, err := m.getKubeletContainers(all)
 	if err != nil {
 		return nil, err
 	}
+	// 遍历所有container, 记录到对应的Pod结构中
 	for i := range containers {
 		c := containers[i]
 		if c.Metadata == nil {
@@ -398,6 +409,11 @@ func (m *kubeGenericRuntimeManager) GetPods(all bool) ([]*kubecontainer.Pod, err
 			continue
 		}
 
+		// container label的uid,name,namesapce 为pod的uid, name, namesapce
+		// label的key:
+		// 	"io.kubernetes.pod.name"
+		// 	"io.kubernetes.pod.namespace"
+		// 	"io.kubernetes.pod.uid"
 		labelledInfo := getContainerInfoFromLabels(c.Labels)
 		pod, found := pods[labelledInfo.PodUID]
 		if !found {
@@ -409,6 +425,7 @@ func (m *kubeGenericRuntimeManager) GetPods(all bool) ([]*kubecontainer.Pod, err
 			pods[labelledInfo.PodUID] = pod
 		}
 
+		// 将container信息转换为kubelet的Container结构, 记录到对应pod的Container中
 		converted, err := m.toKubeContainer(c)
 		if err != nil {
 			klog.V(4).InfoS("Convert container of pod failed", "runtimeName", m.runtimeName, "container", c, "podUID", labelledInfo.PodUID, "err", err)
@@ -418,6 +435,7 @@ func (m *kubeGenericRuntimeManager) GetPods(all bool) ([]*kubecontainer.Pod, err
 		pod.Containers = append(pod.Containers, converted)
 	}
 
+	// 转换为list后返回
 	// Convert map to list.
 	var result []*kubecontainer.Pod
 	for _, pod := range pods {
@@ -477,6 +495,7 @@ type podActions struct {
 	EphemeralContainersToStart []int
 }
 
+// podSandboxChanged 检查pod的spec是否有变化
 // podSandboxChanged checks whether the spec of the pod is changed and returns
 // (changed, new attempt, original sandboxID if exist).
 func (m *kubeGenericRuntimeManager) podSandboxChanged(pod *v1.Pod, podStatus *kubecontainer.PodStatus) (bool, uint32, string) {
@@ -485,6 +504,7 @@ func (m *kubeGenericRuntimeManager) podSandboxChanged(pod *v1.Pod, podStatus *ku
 		return true, 0, ""
 	}
 
+	// 计算现在的Sandbox数量
 	readySandboxCount := 0
 	for _, s := range podStatus.SandboxStatuses {
 		if s.State == runtimeapi.PodSandboxState_SANDBOX_READY {
@@ -540,6 +560,7 @@ func containerSucceeded(c *v1.Container, podStatus *kubecontainer.PodStatus) boo
 func (m *kubeGenericRuntimeManager) computePodActions(pod *v1.Pod, podStatus *kubecontainer.PodStatus) podActions {
 	klog.V(5).InfoS("Syncing Pod", "pod", klog.KObj(pod))
 
+	// 检查pod spec与当前的pod sandbox, 判断是否需要创建sandbox
 	createPodSandbox, attempt, sandboxID := m.podSandboxChanged(pod, podStatus)
 	changes := podActions{
 		KillPod:           createPodSandbox,
@@ -723,8 +744,11 @@ func (m *kubeGenericRuntimeManager) computePodActions(pod *v1.Pod, podStatus *ku
 //  5. Create ephemeral containers.
 //  6. Create init containers.
 //  7. Create normal containers.
-func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontainer.PodStatus, pullSecrets []v1.Secret, backOff *flowcontrol.Backoff) (result kubecontainer.PodSyncResult) {
+func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod,
+	podStatus *kubecontainer.PodStatus, pullSecrets []v1.Secret,
+	backOff *flowcontrol.Backoff) (result kubecontainer.PodSyncResult) {
 	// Step 1: Compute sandbox and container changes.
+	// 检查pod spec与当前的pod，得到需要kill/start的sandbox与container
 	podContainerChanges := m.computePodActions(pod, podStatus)
 	klog.V(3).InfoS("computePodActions got for pod", "podActions", podContainerChanges, "pod", klog.KObj(pod))
 	if podContainerChanges.CreateSandbox {
@@ -970,7 +994,8 @@ func (m *kubeGenericRuntimeManager) doBackOff(pod *v1.Pod, container *v1.Contain
 // gracePeriodOverride if specified allows the caller to override the pod default grace period.
 // only hard kill paths are allowed to specify a gracePeriodOverride in the kubelet in order to not corrupt user data.
 // it is useful when doing SIGKILL for hard eviction scenarios, or max grace period during soft eviction scenarios.
-func (m *kubeGenericRuntimeManager) KillPod(pod *v1.Pod, runningPod kubecontainer.Pod, gracePeriodOverride *int64) error {
+func (m *kubeGenericRuntimeManager) KillPod(pod *v1.Pod, runningPod kubecontainer.Pod,
+	gracePeriodOverride *int64) error {
 	err := m.killPodWithSyncResult(pod, runningPod, gracePeriodOverride)
 	return err.Error()
 }
@@ -988,6 +1013,7 @@ func (m *kubeGenericRuntimeManager) killPodWithSyncResult(pod *v1.Pod, runningPo
 	result.AddSyncResult(killSandboxResult)
 	// Stop all sandboxes belongs to same pod
 	for _, podSandbox := range runningPod.Sandboxes {
+		// 停止sandbox
 		if err := m.runtimeService.StopPodSandbox(podSandbox.ID.ID); err != nil {
 			killSandboxResult.Fail(kubecontainer.ErrKillPodSandbox, err.Error())
 			klog.ErrorS(nil, "Failed to stop sandbox", "podSandboxID", podSandbox.ID)
@@ -999,7 +1025,8 @@ func (m *kubeGenericRuntimeManager) killPodWithSyncResult(pod *v1.Pod, runningPo
 
 // GetPodStatus retrieves the status of the pod, including the
 // information of all containers in the pod that are visible in Runtime.
-func (m *kubeGenericRuntimeManager) GetPodStatus(uid kubetypes.UID, name, namespace string) (*kubecontainer.PodStatus, error) {
+func (m *kubeGenericRuntimeManager) GetPodStatus(uid kubetypes.UID, name,
+	namespace string) (*kubecontainer.PodStatus, error) {
 	// Now we retain restart count of container as a container label. Each time a container
 	// restarts, pod will read the restart count from the registered dead container, increment
 	// it to get the new restart count, and then add a label with the new restart count on
@@ -1013,6 +1040,7 @@ func (m *kubeGenericRuntimeManager) GetPodStatus(uid kubetypes.UID, name, namesp
 	// Anyhow, we only promised "best-effort" restart count reporting, we can just ignore
 	// these limitations now.
 	// TODO: move this comment to SyncPod.
+	// 通过runtimeService List得到pod对应的所有sandbox id
 	podSandboxIDs, err := m.getSandboxIDByPodUID(uid, nil)
 	if err != nil {
 		return nil, err
@@ -1030,6 +1058,7 @@ func (m *kubeGenericRuntimeManager) GetPodStatus(uid kubetypes.UID, name, namesp
 
 	klog.V(4).InfoS("getSandboxIDByPodUID got sandbox IDs for pod", "podSandboxID", podSandboxIDs, "pod", klog.KObj(pod))
 
+	// 通过runtimeService的PodSandboxStatus得到sanbox的状态
 	sandboxStatuses := make([]*runtimeapi.PodSandboxStatus, len(podSandboxIDs))
 	podIPs := []string{}
 	for idx, podSandboxID := range podSandboxIDs {

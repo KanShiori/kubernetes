@@ -1617,12 +1617,14 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 		return syncErr
 	}
 
+	// 非host network, 检查网络插件是否ok
 	// If the network plugin is not ready, only start the pod if it uses the host network
 	if err := kl.runtimeState.networkErrors(); err != nil && !kubecontainer.IsHostNetworkPod(pod) {
 		kl.recorder.Eventf(pod, v1.EventTypeWarning, events.NetworkNotReady, "%s: %v", NetworkNotReadyErrorMsg, err)
 		return fmt.Errorf("%s: %v", NetworkNotReadyErrorMsg, err)
 	}
 
+	// 创建并更新pod的cgroup
 	// Create Cgroups for the pod and apply resource parameters
 	// to them if cgroups-per-qos flag is enabled.
 	pcm := kl.containerManager.NewPodContainerManager()
@@ -1673,6 +1675,7 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 		}
 	}
 
+	// 创建static pod对应的mirror pod
 	// Create Mirror Pod for Static Pod if it doesn't already exist
 	if kubetypes.IsStaticPod(pod) {
 		deleted := false
@@ -1704,6 +1707,7 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 		}
 	}
 
+	// 创建pod的数据目录
 	// Make data directories for the pod
 	if err := kl.makePodDataDirs(pod); err != nil {
 		kl.recorder.Eventf(pod, v1.EventTypeWarning, events.FailedToMakePodDataDirectories, "error making pod data directories: %v", err)
@@ -1722,9 +1726,11 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 		}
 	}
 
+	// 获取pull image使用的secret信息
 	// Fetch the pull secrets for the pod
 	pullSecrets := kl.getPullSecretsForPod(pod)
 
+	// 调用runtime进行pod sync
 	// Call the container runtime's SyncPod callback
 	result := kl.containerRuntime.SyncPod(pod, podStatus, pullSecrets, kl.backOff)
 	kl.reasonCache.Update(pod.UID, result)
@@ -1963,15 +1969,19 @@ func (kl *Kubelet) canRunPod(pod *v1.Pod) lifecycle.PodAdmitResult {
 // any new change seen, will run a sync against desired state and running state. If
 // no changes are seen to the configuration, will synchronize the last known desired
 // state every sync-frequency seconds. Never returns.
+// syncLoop 是kubelet最核心的工作, 监听pod的change event, 并且向期望的status处理.
 func (kl *Kubelet) syncLoop(updates <-chan kubetypes.PodUpdate, handler SyncHandler) {
 	klog.InfoS("Starting kubelet main sync loop")
 	// The syncTicker wakes up kubelet to checks if there are any pod workers
 	// that need to be sync'd. A one-second period is sufficient because the
 	// sync interval is defaulted to 10s.
+	// ticker的创建
 	syncTicker := time.NewTicker(time.Second)
 	defer syncTicker.Stop()
 	housekeepingTicker := time.NewTicker(housekeepingPeriod)
 	defer housekeepingTicker.Stop()
+
+	// 监听pleg发送的event
 	plegCh := kl.pleg.Watch()
 	const (
 		base   = 100 * time.Millisecond
@@ -1987,6 +1997,7 @@ func (kl *Kubelet) syncLoop(updates <-chan kubetypes.PodUpdate, handler SyncHand
 	}
 
 	for {
+		// 检查runtimeState, 如果出错直接跳过pod sync
 		if err := kl.runtimeState.runtimeErrors(); err != nil {
 			klog.ErrorS(err, "Skipping pod synchronization")
 			// exponential backoff
@@ -1997,6 +2008,7 @@ func (kl *Kubelet) syncLoop(updates <-chan kubetypes.PodUpdate, handler SyncHand
 		// reset backoff if we have a success
 		duration = base
 
+		// 进行一个syncLoop的处理, 并记下前后时间于<syncLoopMonitor>
 		kl.syncLoopMonitor.Store(kl.clock.Now())
 		if !kl.syncLoopIteration(updates, handler, syncTicker.C, housekeepingTicker.C, plegCh) {
 			break
@@ -2038,9 +2050,26 @@ func (kl *Kubelet) syncLoop(updates <-chan kubetypes.PodUpdate, handler SyncHand
 // * health manager: sync pods that have failed or in which one or more
 //                     containers have failed health checks
 func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handler SyncHandler,
-	syncCh <-chan time.Time, housekeepingCh <-chan time.Time, plegCh <-chan *pleg.PodLifecycleEvent) bool {
+	syncCh <-chan time.Time, housekeepingCh <-chan time.Time,
+	plegCh <-chan *pleg.PodLifecycleEvent) bool {
+	// 最核心的逻辑, 监听各个pod变更相关的event, 然后调用[handler]对应的Handle函数做处理
+	// 目前监听的channel来自:
+	//	* configCh: 来自apiServe, 表示remote 对pod有修改
+	// 	* plegCh: pleg发送的关于本地机器上pod的change event
+	//	* syncCh: 周期性的pod sync, sync来自其他 模块请求/有work 的pod
+	//	* livenessCh: livenessManager发送的 liveness检测失败的event
+	//	* housekeepingCh: 周期性的执行pod的清理
+
 	select {
 	case u, open := <-configCh:
+		// 监听并处理pod配置更新的event, 目前event包括:
+		// 	1.add: 添加pod配置, 说明有新的pod任务被下发了, HandlePodAdditions()处理
+		//	2.update: 更新pod配置, HandlePodUpdates()处理
+		//	3.remove：移除一个pod, HandlePodRemoves()处理
+		//	4.reconcile: HandlePodReconcile()处理
+		//	5.delete: 删除一个pod, 但是会调用HandlePodUpdates()来处理
+		//	6.restore: 从checkpoint restore一个pod, 会用HandlePodAdditions()处理
+
 		// Update from a config source; dispatch it to the right handler
 		// callback.
 		if !open {
@@ -2048,6 +2077,7 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 			return false
 		}
 
+		// 根据event的类型处理
 		switch u.Op {
 		case kubetypes.ADD:
 			klog.V(2).InfoS("SyncLoop ADD", "source", u.Source, "pods", format.Pods(u.Pods))
@@ -2086,6 +2116,7 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 			kl.lastContainerStartedTime.Add(e.ID, time.Now())
 		}
 		if isSyncPodWorthy(e) {
+			// 通过<handler> HandlePodSyncs()处理其他所有的Event
 			// PLEG event for a pod; sync it.
 			if pod, ok := kl.podManager.GetPodByUID(e.ID); ok {
 				klog.V(2).InfoS("SyncLoop (PLEG): event for pod", "pod", klog.KObj(pod), "event", e)
@@ -2096,12 +2127,18 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 			}
 		}
 
+		// 对应ContainerDied的event, 还要清理pod的所有container
 		if e.Type == pleg.ContainerDied {
 			if containerID, ok := e.Data.(string); ok {
 				kl.cleanUpContainersInPod(e.ID, containerID)
 			}
 		}
 	case <-syncCh:
+		// 周期性处理需要sync的pod
+
+		// 得到需要sync的pod, 有两种情况:
+		//	1.pod对应的work存在
+		//	2.其他模块发送了sync pod的请求
 		// Sync pods waiting for sync
 		podsToSync := kl.getPodsToSync()
 		if len(podsToSync) == 0 {
@@ -2110,6 +2147,7 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 		klog.V(4).InfoS("SyncLoop (SYNC) pods", "total", len(podsToSync), "pods", format.Pods(podsToSync))
 		handler.HandlePodSyncs(podsToSync)
 	case update := <-kl.livenessManager.Updates():
+		// 监听liveness probe发送的event
 		if update.Result == proberesults.Failure {
 			handleProbeSync(kl, update, handler, "liveness", "unhealthy")
 		}
@@ -2132,6 +2170,7 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 		}
 		handleProbeSync(kl, update, handler, "startup", status)
 	case <-housekeepingCh:
+		// 周期性的housekeeping
 		if !kl.sourcesReady.AllReady() {
 			// If the sources aren't ready or volume manager has not yet synced the states,
 			// skip housekeeping, as we may accidentally delete pods from unready sources.
@@ -2193,16 +2232,20 @@ func (kl *Kubelet) handleMirrorPod(mirrorPod *v1.Pod, start time.Time) {
 // HandlePodAdditions is the callback in SyncHandler for pods being added from
 // a config source.
 func (kl *Kubelet) HandlePodAdditions(pods []*v1.Pod) {
+	// 根据pod createtime排序处理
 	start := kl.clock.Now()
 	sort.Sort(sliceutils.PodsByCreationTime(pods))
 	for _, pod := range pods {
 		existingPods := kl.podManager.GetPods()
+
+		// 添加pod spec至podManager
 		// Always add the pod to the pod manager. Kubelet relies on the pod
 		// manager as the source of truth for the desired state. If a pod does
 		// not exist in the pod manager, it means that it has been deleted in
 		// the apiserver and no action (other than cleanup) is required.
 		kl.podManager.AddPod(pod)
 
+		// 判断是否是mirror pod, mirror pod不同处理
 		if kubetypes.IsMirrorPod(pod) {
 			kl.handleMirrorPod(pod, start)
 			continue
@@ -2225,8 +2268,13 @@ func (kl *Kubelet) HandlePodAdditions(pods []*v1.Pod) {
 				continue
 			}
 		}
+		// 得到mirrorPod
 		mirrorPod, _ := kl.podManager.GetMirrorPodByPod(pod)
+
+		// 分配SyncPodCreate任务给Worker
 		kl.dispatchWork(pod, kubetypes.SyncPodCreate, mirrorPod, start)
+
+		// 将pod加入到probeManager
 		// TODO: move inside syncPod and make reentrant
 		// https://github.com/kubernetes/kubernetes/issues/105014
 		kl.probeManager.AddPod(pod)
@@ -2238,7 +2286,10 @@ func (kl *Kubelet) HandlePodAdditions(pods []*v1.Pod) {
 func (kl *Kubelet) HandlePodUpdates(pods []*v1.Pod) {
 	start := kl.clock.Now()
 	for _, pod := range pods {
+		// podManager 更新pod config
 		kl.podManager.UpdatePod(pod)
+
+		// 处理mirror pod
 		if kubetypes.IsMirrorPod(pod) {
 			kl.handleMirrorPod(pod, start)
 			continue

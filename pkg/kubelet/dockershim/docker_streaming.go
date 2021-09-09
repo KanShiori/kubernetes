@@ -64,7 +64,9 @@ func (r *streamingRuntime) exec(ctx context.Context, containerID string, cmd []s
 	return r.execHandler.ExecInContainer(ctx, r.client, container, cmd, in, out, errw, tty, resize, timeout)
 }
 
-func (r *streamingRuntime) Attach(containerID string, in io.Reader, out, errw io.WriteCloser, tty bool, resize <-chan remotecommand.TerminalSize) error {
+func (r *streamingRuntime) Attach(containerID string,
+	in io.Reader, out, errw io.WriteCloser,
+	tty bool, resize <-chan remotecommand.TerminalSize) error {
 	_, err := checkContainerStatus(r.client, containerID)
 	if err != nil {
 		return err
@@ -73,7 +75,8 @@ func (r *streamingRuntime) Attach(containerID string, in io.Reader, out, errw io
 	return attachContainer(r.client, containerID, in, out, errw, tty, resize)
 }
 
-func (r *streamingRuntime) PortForward(podSandboxID string, port int32, stream io.ReadWriteCloser) error {
+func (r *streamingRuntime) PortForward(podSandboxID string, port int32,
+	stream io.ReadWriteCloser) error {
 	if port < 0 || port > math.MaxUint16 {
 		return fmt.Errorf("invalid port %d", port)
 	}
@@ -107,6 +110,7 @@ func (ds *dockerService) ExecSync(ctx context.Context, req *runtimeapi.ExecSyncR
 
 		exitCode = int32(exitError.ExitStatus())
 	}
+	// - 返回结果
 	return &runtimeapi.ExecSyncResponse{
 		Stdout:   stdoutBuffer.Bytes(),
 		Stderr:   stderrBuffer.Bytes(),

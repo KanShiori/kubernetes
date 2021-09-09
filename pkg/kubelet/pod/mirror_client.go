@@ -58,7 +58,8 @@ type basicMirrorClient struct {
 }
 
 // NewBasicMirrorClient returns a new MirrorClient.
-func NewBasicMirrorClient(apiserverClient clientset.Interface, nodeName string, nodeGetter nodeGetter) MirrorClient {
+func NewBasicMirrorClient(apiserverClient clientset.Interface, nodeName string,
+	nodeGetter nodeGetter) MirrorClient {
 	return &basicMirrorClient{
 		apiserverClient: apiserverClient,
 		nodeName:        nodeName,

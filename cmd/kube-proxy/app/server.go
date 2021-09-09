@@ -307,15 +307,18 @@ func (o *Options) Run() error {
 		return o.writeConfigFile()
 	}
 
+	// 创建 ProxyServer 对象
 	proxyServer, err := NewProxyServer(o)
 	if err != nil {
 		return err
 	}
 
+	// 判断是否有被关闭, 关闭执行 PoroxyServer.CleanupAndExit()
 	if o.CleanupAndExit {
 		return proxyServer.CleanupAndExit()
 	}
 
+	// 记录[proxyServer], 并运行
 	o.proxyServer = proxyServer
 	return o.runLoop()
 }
@@ -327,12 +330,15 @@ func (o *Options) runLoop() error {
 		o.watcher.Run()
 	}
 
+	// 启动 groutine 运行 ProxyServer
+	// 该 groutine 会阻塞直到返回 err
 	// run the proxy in goroutine
 	go func() {
 		err := o.proxyServer.Run()
 		o.errCh <- err
 	}()
 
+	// 阻塞等待<proxyServer>的退出
 	for {
 		err := <-o.errCh
 		if err != nil {
@@ -526,8 +532,8 @@ with the apiserver API to configure the proxy.`,
 	return cmd
 }
 
-// ProxyServer represents all the parameters required to start the Kubernetes proxy server. All
-// fields are required.
+// ProxyServer represents all the parameters required to start the Kubernetes proxy server.
+// All fields are required.
 type ProxyServer struct {
 	Client                 clientset.Interface
 	EventClient            v1core.EventsGetter

@@ -237,6 +237,7 @@ func NewPriorityQueue(
 	informerFactory informers.SharedInformerFactory,
 	opts ...Option,
 ) *PriorityQueue {
+	// 配置项
 	options := defaultPriorityQueueOptions
 	for _, opt := range opts {
 		opt(&options)
@@ -252,6 +253,7 @@ func NewPriorityQueue(
 		options.podNominator = NewPodNominator(informerFactory.Core().V1().Pods().Lister())
 	}
 
+	// 构建PriorityQueue对象
 	pq := &PriorityQueue{
 		PodNominator:              options.podNominator,
 		clock:                     options.clock,
@@ -288,14 +290,18 @@ func (p *PriorityQueue) Add(pod *v1.Pod) error {
 		klog.ErrorS(err, "Error adding pod to the active queue", "pod", klog.KObj(pod))
 		return err
 	}
+	// 删除<unschedulableQ>中对应的pod
 	if p.unschedulableQ.get(pod) != nil {
 		klog.ErrorS(nil, "Error: pod is already in the unschedulable queue", "pod", klog.KObj(pod))
 		p.unschedulableQ.delete(pod)
 	}
+	// 删除<podBackoffQ>.Delete()中对应的pod
 	// Delete pod from backoffQ if it is backing off
 	if err := p.podBackoffQ.Delete(pInfo); err == nil {
 		klog.ErrorS(nil, "Error: pod is already in the podBackoff queue", "pod", klog.KObj(pod))
 	}
+
+	// <nominatedPods>.add()
 	metrics.SchedulerQueueIncomingPods.WithLabelValues("active", PodAdd).Inc()
 	p.PodNominator.AddNominatedPod(pInfo.PodInfo, "")
 	p.cond.Broadcast()
@@ -376,6 +382,8 @@ func (p *PriorityQueue) SchedulingCycle() int64 {
 func (p *PriorityQueue) AddUnschedulableIfNotPresent(pInfo *framework.QueuedPodInfo, podSchedulingCycle int64) error {
 	p.lock.Lock()
 	defer p.lock.Unlock()
+
+	// 查询是否已经存在对应pod了, 已经存在会返回个error
 	pod := pInfo.Pod
 	if p.unschedulableQ.get(pod) != nil {
 		return fmt.Errorf("Pod %v is already present in unschedulable queue", klog.KObj(pod))
@@ -412,6 +420,7 @@ func (p *PriorityQueue) flushBackoffQCompleted() {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 	for {
+		// 看heap顶的pod (backoff时间最大)
 		rawPodInfo := p.podBackoffQ.Peek()
 		if rawPodInfo == nil {
 			return
@@ -421,6 +430,8 @@ func (p *PriorityQueue) flushBackoffQCompleted() {
 		if boTime.After(p.clock.Now()) {
 			return
 		}
+
+		// backoff时间到, Pop弹出, 移动到activeQ
 		_, err := p.podBackoffQ.Pop()
 		if err != nil {
 			klog.ErrorS(err, "Unable to pop pod from backoff queue despite backoff completion", "pod", klog.KObj(pod))
@@ -429,6 +440,8 @@ func (p *PriorityQueue) flushBackoffQCompleted() {
 		p.activeQ.Add(rawPodInfo)
 		metrics.SchedulerQueueIncomingPods.WithLabelValues("active", BackoffComplete).Inc()
 		defer p.cond.Broadcast()
+
+		// 循环继续检查backoffQ的下一个pod
 	}
 }
 
@@ -458,6 +471,7 @@ func (p *PriorityQueue) flushUnschedulableQLeftover() {
 func (p *PriorityQueue) Pop() (*framework.QueuedPodInfo, error) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
+	// 循环等待
 	for p.activeQ.Len() == 0 {
 		// When the queue is empty, invocation of Pop() is blocked until new item is enqueued.
 		// When Close() is called, the p.closed is set and the condition is broadcast,
@@ -465,8 +479,10 @@ func (p *PriorityQueue) Pop() (*framework.QueuedPodInfo, error) {
 		if p.closed {
 			return nil, fmt.Errorf(queueClosed)
 		}
+		// cond.Wait()会自动解锁加锁
 		p.cond.Wait()
 	}
+	// Pop activeQ的head
 	obj, err := p.activeQ.Pop()
 	if err != nil {
 		return nil, err
@@ -500,6 +516,7 @@ func (p *PriorityQueue) Update(oldPod, newPod *v1.Pod) error {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
+	// 更新activeQ或者backoffQ中对应pod的信息为[newPod]
 	if oldPod != nil {
 		oldPodInfo := newQueuedPodInfoForLookup(oldPod)
 		// If the pod is already in the active queue, just update it there.
@@ -509,6 +526,7 @@ func (p *PriorityQueue) Update(oldPod, newPod *v1.Pod) error {
 			return p.activeQ.Update(pInfo)
 		}
 
+		// 将backoffQ中对应的old pod删除, 直接移动到activeQ中
 		// If the pod is in the backoff queue, update it there.
 		if oldPodInfo, exists, _ := p.podBackoffQ.Get(oldPodInfo); exists {
 			pInfo := updatePod(oldPodInfo, newPod)
@@ -517,6 +535,7 @@ func (p *PriorityQueue) Update(oldPod, newPod *v1.Pod) error {
 		}
 	}
 
+	// 如果pod是在unschedulableQ的, 并且其信息更新过, 将其移动到activeQ
 	// If the pod is in the unschedulable queue, updating it may make it schedulable.
 	if usPodInfo := p.unschedulableQ.get(newPod); usPodInfo != nil {
 		pInfo := updatePod(usPodInfo, newPod)
@@ -541,6 +560,8 @@ func (p *PriorityQueue) Update(oldPod, newPod *v1.Pod) error {
 
 		return nil
 	}
+
+	// 如果old pod原来就不存在, 那么将其加入到activeQ
 	// If pod is not in any of the queues, we put it in the active queue.
 	pInfo := p.newQueuedPodInfo(newPod)
 	if err := p.activeQ.Add(pInfo); err != nil {
@@ -569,7 +590,8 @@ func (p *PriorityQueue) Delete(pod *v1.Pod) error {
 // may make pending pods with matching affinity terms schedulable.
 func (p *PriorityQueue) AssignedPodAdded(pod *v1.Pod) {
 	p.lock.Lock()
-	p.movePodsToActiveOrBackoffQueue(p.getUnschedulablePodsWithMatchingAffinityTerm(pod), AssignedPodAdd)
+	p.movePodsToActiveOrBackoffQueue(p.getUnschedulablePodsWithMatchingAffinityTerm(pod),
+		AssignedPodAdd)
 	p.lock.Unlock()
 }
 
@@ -577,7 +599,8 @@ func (p *PriorityQueue) AssignedPodAdded(pod *v1.Pod) {
 // may make pending pods with matching affinity terms schedulable.
 func (p *PriorityQueue) AssignedPodUpdated(pod *v1.Pod) {
 	p.lock.Lock()
-	p.movePodsToActiveOrBackoffQueue(p.getUnschedulablePodsWithMatchingAffinityTerm(pod), AssignedPodUpdate)
+	p.movePodsToActiveOrBackoffQueue(p.getUnschedulablePodsWithMatchingAffinityTerm(pod),
+		AssignedPodUpdate)
 	p.lock.Unlock()
 }
 
@@ -618,6 +641,7 @@ func (p *PriorityQueue) movePodsToActiveOrBackoffQueue(podInfoList []*framework.
 				p.unschedulableQ.delete(pod)
 			}
 		} else {
+			// 不在backoff周期了, 移动到backoffQ
 			if err := p.activeQ.Add(pInfo); err != nil {
 				klog.ErrorS(err, "Error adding pod to the scheduling queue", "pod", klog.KObj(pod))
 			} else {
@@ -626,6 +650,7 @@ func (p *PriorityQueue) movePodsToActiveOrBackoffQueue(podInfoList []*framework.
 			}
 		}
 	}
+	// 记录<moveRequestCycle> 为当前的 <schedulingCycle>
 	p.moveRequestCycle = p.schedulingCycle
 	if moved {
 		p.cond.Broadcast()

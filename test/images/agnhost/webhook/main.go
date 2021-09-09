@@ -39,6 +39,7 @@ var (
 	sidecarImage string
 )
 
+// Webhook command
 // CmdWebhook is used by agnhost Cobra.
 var CmdWebhook = &cobra.Command{
 	Use:   "webhook",
@@ -67,12 +68,15 @@ type admitv1beta1Func func(v1beta1.AdmissionReview) *v1beta1.AdmissionResponse
 // admitv1beta1Func handles a v1 admission
 type admitv1Func func(v1.AdmissionReview) *v1.AdmissionResponse
 
+// admitHandler 是 Webhook handler 的抽象，需要能够处理 v1beta1 v1 版本 AdmissionReview 对象
+//
 // admitHandler is a handler, for both validators and mutators, that supports multiple admission review versions
 type admitHandler struct {
 	v1beta1 admitv1beta1Func
 	v1      admitv1Func
 }
 
+// newDelegateToV1AdmitHandler 返回能够自动支持 v1beta1 版本 AdmissionReview 的 Handler
 func newDelegateToV1AdmitHandler(f admitv1Func) admitHandler {
 	return admitHandler{
 		v1beta1: delegateV1beta1AdmitToV1(f),
@@ -88,9 +92,12 @@ func delegateV1beta1AdmitToV1(f admitv1Func) admitv1beta1Func {
 	}
 }
 
+// serve 处理 HTTP 请求，从 body 中解析得到 AdmissionReview，然后调用 admit 回调处理，最后将结果回复
+//
 // serve handles the http portion of a request prior to handing to an admit
 // function
 func serve(w http.ResponseWriter, r *http.Request, admit admitHandler) {
+	// read http body
 	var body []byte
 	if r.Body != nil {
 		if data, err := ioutil.ReadAll(r.Body); err == nil {
@@ -98,6 +105,7 @@ func serve(w http.ResponseWriter, r *http.Request, admit admitHandler) {
 		}
 	}
 
+	// 检查 Header Content-Type，Webhook 只支持 "application/json"
 	// verify the content type is accurate
 	contentType := r.Header.Get("Content-Type")
 	if contentType != "application/json" {
@@ -107,6 +115,8 @@ func serve(w http.ResponseWriter, r *http.Request, admit admitHandler) {
 
 	klog.V(2).Info(fmt.Sprintf("handling request: %s", body))
 
+	// 解析 body -> runtime.Object
+	// 因为 AdmissionReview 也是一个 Kubernetes 资源，所以直接使用 Kubernetes 进行解析
 	deserializer := codecs.UniversalDeserializer()
 	obj, gvk, err := deserializer.Decode(body, nil, nil)
 	if err != nil {
@@ -116,28 +126,45 @@ func serve(w http.ResponseWriter, r *http.Request, admit admitHandler) {
 		return
 	}
 
+	// 进一步得到 Admission Request
 	var responseObj runtime.Object
 	switch *gvk {
 	case v1beta1.SchemeGroupVersion.WithKind("AdmissionReview"):
+		// v1beta1 版本 AdmissionReview 对象支持
+
 		requestedAdmissionReview, ok := obj.(*v1beta1.AdmissionReview)
 		if !ok {
 			klog.Errorf("Expected v1beta1.AdmissionReview but got: %T", obj)
 			return
 		}
+
+		// 得到真正的 v1beta1.AdmissionReview 对象
 		responseAdmissionReview := &v1beta1.AdmissionReview{}
 		responseAdmissionReview.SetGroupVersionKind(*gvk)
+
+		// 调用回调处理，返回值为 AdmissionReview.Response
 		responseAdmissionReview.Response = admit.v1beta1(*requestedAdmissionReview)
+
+		// 设置好 Response
 		responseAdmissionReview.Response.UID = requestedAdmissionReview.Request.UID
 		responseObj = responseAdmissionReview
 	case v1.SchemeGroupVersion.WithKind("AdmissionReview"):
+		// v1 版本 AdmissionReview 对象支持
+	
 		requestedAdmissionReview, ok := obj.(*v1.AdmissionReview)
 		if !ok {
 			klog.Errorf("Expected v1.AdmissionReview but got: %T", obj)
 			return
 		}
+
+		// 得到真正的 v1.AdmissionReview 对象
 		responseAdmissionReview := &v1.AdmissionReview{}
 		responseAdmissionReview.SetGroupVersionKind(*gvk)
+
+		// 调用回调处理，返回值为 AdmissionReview.Response
 		responseAdmissionReview.Response = admit.v1(*requestedAdmissionReview)
+
+		// 设置好 Response
 		responseAdmissionReview.Response.UID = requestedAdmissionReview.Request.UID
 		responseObj = responseAdmissionReview
 	default:
@@ -147,6 +174,7 @@ func serve(w http.ResponseWriter, r *http.Request, admit admitHandler) {
 		return
 	}
 
+	// 编码 http response
 	klog.V(2).Info(fmt.Sprintf("sending response: %v", responseObj))
 	respBytes, err := json.Marshal(responseObj)
 	if err != nil {
@@ -154,6 +182,8 @@ func serve(w http.ResponseWriter, r *http.Request, admit admitHandler) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// 回复
 	w.Header().Set("Content-Type", "application/json")
 	if _, err := w.Write(respBytes); err != nil {
 		klog.Error(err)
@@ -214,6 +244,9 @@ func main(cmd *cobra.Command, args []string) {
 		KeyFile:  keyFile,
 	}
 
+	// 定义 HTTP handle
+	// 下面每个 Handle 都是一个 Admission Webhook
+	// ** 只要一个 HTTP Endpoint 能够处理 AdmissionReview 对象，那么就可以作为一个 Admission Webhook **
 	http.HandleFunc("/always-allow-delay-5s", serveAlwaysAllowDelayFiveSeconds)
 	http.HandleFunc("/always-deny", serveAlwaysDeny)
 	http.HandleFunc("/add-label", serveAddLabel)

@@ -150,12 +150,15 @@ func (t probeType) String() string {
 	}
 }
 
+// AddPod 创建pod中container中定义的probe对应的worker, 记录到<workers>中
 func (m *manager) AddPod(pod *v1.Pod) {
 	m.workerLock.Lock()
 	defer m.workerLock.Unlock()
 
 	key := probeKey{podUID: pod.UID}
+	// 遍历pod的所有Container spec
 	for _, c := range pod.Spec.Containers {
+		// 创建probeKey
 		key.containerName = c.Name
 
 		if c.StartupProbe != nil {
@@ -165,37 +168,48 @@ func (m *manager) AddPod(pod *v1.Pod) {
 					"pod", klog.KObj(pod), "containerName", c.Name)
 				return
 			}
+			// 创建worker, 并记录到<workers>(这里是key的副本copy)
 			w := newWorker(m, startup, pod, c)
 			m.workers[key] = w
+			// 启动worker
 			go w.run()
 		}
 
+		// 判断是否定义readiness probe
 		if c.ReadinessProbe != nil {
+			// key probetype记录为readiness类型
 			key.probeType = readiness
 			if _, ok := m.workers[key]; ok {
 				klog.ErrorS(nil, "Readiness probe already exists for container",
 					"pod", klog.KObj(pod), "containerName", c.Name)
 				return
 			}
+			// 创建worker, 并记录到<workers>(这里是key的副本copy)
 			w := newWorker(m, readiness, pod, c)
 			m.workers[key] = w
+			// 启动worker
 			go w.run()
 		}
 
+		// 判断是否定义liveness probe
 		if c.LivenessProbe != nil {
+			// key probetype记录为liveness类型
 			key.probeType = liveness
 			if _, ok := m.workers[key]; ok {
 				klog.ErrorS(nil, "Liveness probe already exists for container",
 					"pod", klog.KObj(pod), "containerName", c.Name)
 				return
 			}
+			// 创建worker, 并记录到<workers>(这里是key的副本copy)
 			w := newWorker(m, liveness, pod, c)
 			m.workers[key] = w
+			// 启动worker
 			go w.run()
 		}
 	}
 }
 
+// RemovePod 停止pod中每个container对应的probe worker, 并从<workers>中删除记录
 func (m *manager) RemovePod(pod *v1.Pod) {
 	m.workerLock.RLock()
 	defer m.workerLock.RUnlock()
@@ -203,15 +217,19 @@ func (m *manager) RemovePod(pod *v1.Pod) {
 	key := probeKey{podUID: pod.UID}
 	for _, c := range pod.Spec.Containers {
 		key.containerName = c.Name
+		// 遍历三种probe type, 存在就停止对应worker
 		for _, probeType := range [...]probeType{readiness, liveness, startup} {
 			key.probeType = probeType
 			if worker, ok := m.workers[key]; ok {
+				// 停止worker, worker.run()退出后自动清理在<workers>中的记录
+				// 通过removeWorker()函数
 				worker.stop()
 			}
 		}
 	}
 }
 
+// CleanupPods 停止所有pod对应的所有workers
 func (m *manager) CleanupPods(desiredPods map[types.UID]sets.Empty) {
 	m.workerLock.RLock()
 	defer m.workerLock.RUnlock()
@@ -224,8 +242,10 @@ func (m *manager) CleanupPods(desiredPods map[types.UID]sets.Empty) {
 }
 
 func (m *manager) UpdatePodStatus(podUID types.UID, podStatus *v1.PodStatus) {
+	// 遍历所有podStatus的每个container status
 	for i, c := range podStatus.ContainerStatuses {
 		var started bool
+		// 由 State.Running & startup probe result & worker exist 赋值ContainerStatus.Started
 		if c.State.Running == nil {
 			started = false
 		} else if result, ok := m.startupManager.Get(kubecontainer.ParseContainerID(c.ContainerID)); ok {

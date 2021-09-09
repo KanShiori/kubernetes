@@ -197,6 +197,8 @@ func (cache *schedulerCache) UpdateSnapshot(nodeSnapshot *Snapshot) error {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 
+	// 读取snapshot上一次的generation
+	// generation用于比较 snapshot中node 与 cache中node 的新旧
 	// Get the last generation of the snapshot.
 	snapshotGeneration := nodeSnapshot.generation
 
@@ -212,6 +214,8 @@ func (cache *schedulerCache) UpdateSnapshot(nodeSnapshot *Snapshot) error {
 	// anti-affinity or the other way around.
 	updateNodesHavePodsWithRequiredAntiAffinity := false
 
+	// 开始遍历整个nodeitem list, 更新其snapshot
+	// 因为<headNode>是按照更新时间排序的, 所以如果其中一个 node的generation 小于 snapshot, 那么其他的都不用比较了
 	// Start from the head of the NodeInfo doubly linked list and update snapshot
 	// of NodeInfos updated after the last snapshot.
 	for node := cache.headNode; node != nil; node = node.next {
@@ -241,6 +245,7 @@ func (cache *schedulerCache) UpdateSnapshot(nodeSnapshot *Snapshot) error {
 			*existing = *clone
 		}
 	}
+	// 更新snapshot Generation为headnode的
 	// Update the snapshot generation with the latest NodeInfo generation.
 	if cache.headNode != nil {
 		nodeSnapshot.generation = cache.headNode.info.Generation
@@ -319,6 +324,20 @@ func (cache *schedulerCache) removeDeletedNodesFromSnapshot(snapshot *Snapshot) 
 		if n, ok := cache.nodes[name]; !ok || n.info.Node() == nil {
 			delete(snapshot.nodeInfoMap, name)
 			toDelete--
+=======
+	// 全量复制nodeTree至snapshot中
+	// Take a snapshot of the nodes order in the tree
+	nodeSnapshot.NodeInfoList = make([]*schedulernodeinfo.NodeInfo, 0, cache.nodeTree.numNodes)
+	nodeSnapshot.HavePodsWithAffinityNodeInfoList = make([]*schedulernodeinfo.NodeInfo, 0, cache.nodeTree.numNodes)
+	for i := 0; i < cache.nodeTree.numNodes; i++ {
+		nodeName := cache.nodeTree.next()
+		if n := nodeSnapshot.NodeInfoMap[nodeName]; n != nil {
+			nodeSnapshot.NodeInfoList = append(nodeSnapshot.NodeInfoList, n)
+			if len(n.PodsWithAffinity()) > 0 {
+				nodeSnapshot.HavePodsWithAffinityNodeInfoList = append(nodeSnapshot.HavePodsWithAffinityNodeInfoList, n)
+			}
+		} else {
+			klog.Errorf("node %q exist in nodeTree but not in NodeInfoMap, this should not happen.", nodeName)
 		}
 	}
 }
@@ -354,11 +373,15 @@ func (cache *schedulerCache) AssumePod(pod *v1.Pod) error {
 
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	// 已存在于cache中, 返回错误
 	if _, ok := cache.podStates[key]; ok {
 		return fmt.Errorf("pod %v is in the cache, so can't be assumed", key)
 	}
 
+	// 调用addPod()添加, 即维护了bind node与pod的映射关系
 	cache.addPod(pod)
+
+	// 记录到<podState>与<assumedPods>中
 	ps := &podState{
 		pod: pod,
 	}
@@ -381,6 +404,7 @@ func (cache *schedulerCache) finishBinding(pod *v1.Pod, now time.Time) error {
 	cache.mu.RLock()
 	defer cache.mu.RUnlock()
 
+	// 将<podStates>中对应的podState.bindingFinished置位true, 并设置其deadline
 	klog.V(5).Infof("Finished binding for pod %v. Can be expired.", key)
 	currState, ok := cache.podStates[key]
 	if ok && cache.assumedPods.Has(key) {
@@ -400,11 +424,13 @@ func (cache *schedulerCache) ForgetPod(pod *v1.Pod) error {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 
+	// 查找对应的podState
 	currState, ok := cache.podStates[key]
 	if ok && currState.pod.Spec.NodeName != pod.Spec.NodeName {
 		return fmt.Errorf("pod %v was assumed on %v but assigned to %v", key, pod.Spec.NodeName, currState.pod.Spec.NodeName)
 	}
 
+	// 从<assumedPods>与<podStates>删除该pod
 	switch {
 	// Only assumed pod can be forgotten.
 	case ok && cache.assumedPods.Has(key):
@@ -422,12 +448,15 @@ func (cache *schedulerCache) ForgetPod(pod *v1.Pod) error {
 
 // Assumes that lock is already acquired.
 func (cache *schedulerCache) addPod(pod *v1.Pod) {
+	// 得到pod bind的node的信息, 如果没有则新加一个
 	n, ok := cache.nodes[pod.Spec.NodeName]
 	if !ok {
 		n = newNodeInfoListItem(framework.NewNodeInfo())
 		cache.nodes[pod.Spec.NodeName] = n
 	}
+	// 对应node信息记录对应pod
 	n.info.AddPod(pod)
+	// 因为node信息有更新, 移动到<headNode>顶
 	cache.moveNodeInfoToHead(pod.Spec.NodeName)
 }
 
@@ -445,11 +474,13 @@ func (cache *schedulerCache) updatePod(oldPod, newPod *v1.Pod) error {
 // removed and there are no more pods left in the node, cleans up the node from
 // the cache.
 func (cache *schedulerCache) removePod(pod *v1.Pod) error {
+	// 查询nodeitem
 	n, ok := cache.nodes[pod.Spec.NodeName]
 	if !ok {
 		klog.Errorf("node %v not found when trying to remove pod %v", pod.Spec.NodeName, pod.Name)
 		return nil
 	}
+	// node记录中删除pod
 	if err := n.info.RemovePod(pod); err != nil {
 		return err
 	}
@@ -482,10 +513,12 @@ func (cache *schedulerCache) AddPod(pod *v1.Pod) error {
 			}
 			cache.addPod(pod)
 		}
+		// 从<assumedPods>中删除, 表明其是added状态
 		delete(cache.assumedPods, key)
 		cache.podStates[key].deadline = nil
 		cache.podStates[key].pod = pod
 	case !ok:
+		// 在assumed中不存在, 说明pod已经expired, 直接加入到<podStates>中
 		// Pod was expired. We should add it back.
 		cache.addPod(pod)
 		ps := &podState{
@@ -507,8 +540,10 @@ func (cache *schedulerCache) UpdatePod(oldPod, newPod *v1.Pod) error {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 
+	// 经典查询
 	currState, ok := cache.podStates[key]
 	switch {
+	// 存在<podStates>, 不存在<assumedPods>, 确认是added pod
 	// An assumed pod won't have Update/Remove event. It needs to have Add event
 	// before Update event, in which case the state would change from Assumed to Added.
 	case ok && !cache.assumedPods.Has(key):
@@ -516,9 +551,11 @@ func (cache *schedulerCache) UpdatePod(oldPod, newPod *v1.Pod) error {
 			klog.Errorf("Pod %v updated on a different node than previously added to.", key)
 			klog.Fatalf("Schedulercache is corrupted and can badly affect scheduling decisions")
 		}
+		// 更新其node与pod关系
 		if err := cache.updatePod(oldPod, newPod); err != nil {
 			return err
 		}
+		// 更新podState
 		currState.pod = newPod
 	default:
 		return fmt.Errorf("pod %v is not added to scheduler cache, so cannot be updated", key)
@@ -535,8 +572,10 @@ func (cache *schedulerCache) RemovePod(pod *v1.Pod) error {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 
+	// 经典查询
 	currState, ok := cache.podStates[key]
 	switch {
+	// 存在<podStates>，不存在<assumedPods>，确认是added pod
 	// An assumed pod won't have Delete/Remove event. It needs to have Add event
 	// before Remove event, in which case the state would change from Assumed to Added.
 	case ok && !cache.assumedPods.Has(key):
@@ -544,10 +583,12 @@ func (cache *schedulerCache) RemovePod(pod *v1.Pod) error {
 			klog.Errorf("Pod %v was assumed to be on %v but got added to %v", key, pod.Spec.NodeName, currState.pod.Spec.NodeName)
 			klog.Fatalf("Schedulercache is corrupted and can badly affect scheduling decisions")
 		}
+		// 删除pod与node映射关系
 		err := cache.removePod(currState.pod)
 		if err != nil {
 			return err
 		}
+		// 删除podState记录
 		delete(cache.podStates, key)
 	default:
 		return fmt.Errorf("pod %v is not found in scheduler cache, so cannot be removed from it", key)
@@ -578,6 +619,7 @@ func (cache *schedulerCache) GetPod(pod *v1.Pod) (*v1.Pod, error) {
 	cache.mu.RLock()
 	defer cache.mu.RUnlock()
 
+	// 在<podStates>中查询, 因为<podStates>包含 added与assumed pod
 	podState, ok := cache.podStates[key]
 	if !ok {
 		return nil, fmt.Errorf("pod %v does not exist in scheduler cache", key)
@@ -590,6 +632,7 @@ func (cache *schedulerCache) AddNode(node *v1.Node) *framework.NodeInfo {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 
+	// 判断其node是否存在于cache中
 	n, ok := cache.nodes[node.Name]
 	if !ok {
 		n = newNodeInfoListItem(framework.NewNodeInfo())
@@ -597,9 +640,12 @@ func (cache *schedulerCache) AddNode(node *v1.Node) *framework.NodeInfo {
 	} else {
 		cache.removeNodeImageStates(n.info.Node())
 	}
+	// node信息更新, 移动到<headNode>头部
 	cache.moveNodeInfoToHead(node.Name)
 
+	// 添加到nodeTree
 	cache.nodeTree.addNode(node)
+	// 添加node上的image信息
 	cache.addNodeImageStates(node, n.info)
 	n.info.SetNode(node)
 	return n.info.Clone()
@@ -609,6 +655,7 @@ func (cache *schedulerCache) UpdateNode(oldNode, newNode *v1.Node) *framework.No
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 
+	// 查询node是否存在于<nodes>
 	n, ok := cache.nodes[newNode.Name]
 	if !ok {
 		n = newNodeInfoListItem(framework.NewNodeInfo())
@@ -619,7 +666,9 @@ func (cache *schedulerCache) UpdateNode(oldNode, newNode *v1.Node) *framework.No
 	}
 	cache.moveNodeInfoToHead(newNode.Name)
 
+	// update nodeTree(不是add)
 	cache.nodeTree.updateNode(oldNode, newNode)
+	// 更新img, node信息
 	cache.addNodeImageStates(newNode, n.info)
 	n.info.SetNode(newNode)
 	return n.info.Clone()
@@ -652,6 +701,7 @@ func (cache *schedulerCache) RemoveNode(node *v1.Node) error {
 	if err := cache.nodeTree.removeNode(node); err != nil {
 		return err
 	}
+	// 删除img信息
 	cache.removeNodeImageStates(node)
 	return nil
 }

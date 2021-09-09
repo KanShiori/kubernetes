@@ -117,7 +117,8 @@ type Manager interface {
 const syncPeriod = 10 * time.Second
 
 // NewManager returns a functional Manager.
-func NewManager(kubeClient clientset.Interface, podManager kubepod.Manager, podDeletionSafety PodDeletionSafetyProvider) Manager {
+func NewManager(kubeClient clientset.Interface, podManager kubepod.Manager,
+	podDeletionSafety PodDeletionSafetyProvider) Manager {
 	return &manager{
 		kubeClient:        kubeClient,
 		podManager:        podManager,
@@ -158,6 +159,8 @@ func (m *manager) Start() {
 	klog.InfoS("Starting to sync pod status with apiserver")
 	//lint:ignore SA1015 Ticker can link since this is only called once and doesn't handle termination.
 	syncTicker := time.Tick(syncPeriod)
+
+	// 执行永久的工作
 	// syncPod and syncBatch share the same go routine to avoid sync races.
 	go wait.Forever(func() {
 		for {
@@ -194,22 +197,26 @@ func (m *manager) SetPodStatus(pod *v1.Pod, status v1.PodStatus) {
 	// Make sure we're caching a deep copy.
 	status = *status.DeepCopy()
 
+	// 更新pod status
 	// Force a status update if deletion timestamp is set. This is necessary
 	// because if the pod is in the non-running state, the pod worker still
 	// needs to be able to trigger an update and/or deletion.
 	m.updateStatusInternal(pod, status, pod.DeletionTimestamp != nil)
 }
 
-func (m *manager) SetContainerReadiness(podUID types.UID, containerID kubecontainer.ContainerID, ready bool) {
+// SetContainerReadiness 将pod对应中container的status变为ready状态, 并更新
+func (m *manager) SetContainerReadiness(podUID types.UID,
+	containerID kubecontainer.ContainerID, ready bool) {
 	m.podStatusesLock.Lock()
 	defer m.podStatusesLock.Unlock()
-
+	// 得到pod对应配置
 	pod, ok := m.podManager.GetPodByUID(podUID)
 	if !ok {
 		klog.V(4).InfoS("Pod has been deleted, no need to update readiness", "podUID", string(podUID))
 		return
 	}
 
+	// 得到当前pod对应的status
 	oldStatus, found := m.podStatuses[pod.UID]
 	if !found {
 		klog.InfoS("Container readiness changed before pod has synced",
@@ -218,6 +225,7 @@ func (m *manager) SetContainerReadiness(podUID types.UID, containerID kubecontai
 		return
 	}
 
+	// 找到对应pod中对应container的status
 	// Find the container to update.
 	containerStatus, _, ok := findContainerStatus(&oldStatus.status, containerID.String())
 	if !ok {
@@ -235,6 +243,7 @@ func (m *manager) SetContainerReadiness(podUID types.UID, containerID kubecontai
 		return
 	}
 
+	// 创建新的status, containerStatus.Ready为[ready]
 	// Make sure we're not updating the cached version.
 	status := *oldStatus.status.DeepCopy()
 	containerStatus, _, _ = findContainerStatus(&status, containerID.String())
@@ -258,10 +267,13 @@ func (m *manager) SetContainerReadiness(podUID types.UID, containerID kubecontai
 	}
 	updateConditionFunc(v1.PodReady, GeneratePodReadyCondition(&pod.Spec, status.Conditions, status.ContainerStatuses, status.Phase))
 	updateConditionFunc(v1.ContainersReady, GenerateContainersReadyCondition(&pod.Spec, status.ContainerStatuses, status.Phase))
+
+	// 更新status
 	m.updateStatusInternal(pod, status, false)
 }
 
-func (m *manager) SetContainerStartup(podUID types.UID, containerID kubecontainer.ContainerID, started bool) {
+func (m *manager) SetContainerStartup(podUID types.UID,
+	containerID kubecontainer.ContainerID, started bool) {
 	m.podStatusesLock.Lock()
 	defer m.podStatusesLock.Unlock()
 
@@ -321,6 +333,7 @@ func findContainerStatus(status *v1.PodStatus, containerID string) (containerSta
 
 }
 
+// TerminatePod 将pod中的container与init container的State设置为Terminate
 func (m *manager) TerminatePod(pod *v1.Pod) {
 	m.podStatusesLock.Lock()
 	defer m.podStatusesLock.Unlock()
@@ -332,6 +345,7 @@ func (m *manager) TerminatePod(pod *v1.Pod) {
 		oldStatus = &cachedStatus.status
 	}
 	status := *oldStatus.DeepCopy()
+	// 更新所有container 与 init container的State为Terminate
 	for i := range status.ContainerStatuses {
 		if status.ContainerStatuses[i].State.Terminated != nil || status.ContainerStatuses[i].State.Waiting != nil {
 			continue

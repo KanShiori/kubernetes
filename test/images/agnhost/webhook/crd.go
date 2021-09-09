@@ -26,6 +26,8 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// admitCRD 检查 CRD，判断其 GVR 正确
+//
 // This function expects all CRDs submitted to it to be apiextensions.k8s.io/v1beta1 or apiextensions.k8s.io/v1.
 func admitCRD(ar v1.AdmissionReview) *v1.AdmissionResponse {
 	klog.V(2).Info("admitting crd")

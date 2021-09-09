@@ -140,13 +140,16 @@ func (w *worker) run() {
 
 	probeTicker := time.NewTicker(probeTickerPeriod)
 
+	// run 结束后的清理操作
 	defer func() {
 		// Clean up.
 		probeTicker.Stop()
+		// 删除results中对应结果
 		if !w.containerID.IsEmpty() {
 			w.resultsManager.Remove(w.containerID)
 		}
 
+		// 删除<probeManager>对应的Worker
 		w.probeManager.removeWorker(w.pod.UID, w.container.Name, w.probeType)
 		ProberResults.Delete(w.proberResultsSuccessfulMetricLabels)
 		ProberResults.Delete(w.proberResultsFailedMetricLabels)
@@ -154,6 +157,7 @@ func (w *worker) run() {
 	}()
 
 probeLoop:
+	// doProbe 执行一次probe
 	for w.doProbe() {
 		// Wait for next probe tick.
 		select {
@@ -178,9 +182,11 @@ func (w *worker) stop() {
 // doProbe probes the container once and records the result.
 // Returns whether the worker should continue.
 func (w *worker) doProbe() (keepGoing bool) {
+	// 处理panic, 因为probe的操作是传入的
 	defer func() { recover() }() // Actually eat panics (HandleCrash takes care of logging)
 	defer runtime.HandleCrash(func(_ interface{}) { keepGoing = true })
 
+	// 确认<statusManager>是否已经存在
 	status, ok := w.probeManager.statusManager.GetPodStatus(w.pod.UID)
 	if !ok {
 		// Either the pod has not been created yet, or it was already deleted.
@@ -195,6 +201,7 @@ func (w *worker) doProbe() (keepGoing bool) {
 		return false
 	}
 
+	// 确认Container存在
 	c, ok := podutil.GetContainerStatus(status.ContainerStatuses, w.container.Name)
 	if !ok || len(c.ContainerID) == 0 {
 		// Either the container has not been created yet, or it was deleted.
@@ -261,10 +268,12 @@ func (w *worker) doProbe() (keepGoing bool) {
 		}
 	}
 
+	// 通过<probeManager>.prober执行probe操作
 	// TODO: in order for exec probes to correctly handle downward API env, we must be able to reconstruct
 	// the full container environment here, OR we must make a call to the CRI in order to get those environment
 	// values from the running container.
-	result, err := w.probeManager.prober.probe(w.probeType, w.pod, status, w.container, w.containerID)
+	result, err := w.probeManager.prober.probe(w.probeType, w.pod, status,
+		w.container, w.containerID)
 	if err != nil {
 		// Prober error, throw away the result.
 		return true
@@ -292,6 +301,7 @@ func (w *worker) doProbe() (keepGoing bool) {
 		return true
 	}
 
+	// 记录probe result到<resultsManager>
 	w.resultsManager.Set(w.containerID, result, w.pod)
 
 	if (w.probeType == liveness || w.probeType == startup) && result == results.Failure {

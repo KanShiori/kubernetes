@@ -51,6 +51,7 @@ import (
 // controllerKind contains the schema.GroupVersionKind for this controller type.
 var controllerKind = apps.SchemeGroupVersion.WithKind("StatefulSet")
 
+// StatefulSetController 控制 StatefulSet
 // StatefulSetController controls statefulsets.
 type StatefulSetController struct {
 	// client interface
@@ -76,6 +77,14 @@ type StatefulSetController struct {
 	queue workqueue.RateLimitingInterface
 }
 
+// NewStatefulSetController 创建一个 StatefulSetController
+//
+// 从其中可以看到其需要操作的资源
+//	+ Pod
+//	+ StatefulSet
+//	+ PVC
+//	+ ControllerRevision
+//
 // NewStatefulSetController creates a new statefulset controller.
 func NewStatefulSetController(
 	podInformer coreinformers.PodInformer,
@@ -84,10 +93,13 @@ func NewStatefulSetController(
 	revInformer appsinformers.ControllerRevisionInformer,
 	kubeClient clientset.Interface,
 ) *StatefulSetController {
+	// 创建 Event Recorder
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartStructuredLogging(0)
 	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "statefulset-controller"})
+
+	// 构建 StatefulSetController
 	ssc := &StatefulSetController{
 		kubeClient: kubeClient,
 		control: NewDefaultStatefulSetControl(
@@ -108,6 +120,9 @@ func NewStatefulSetController(
 		revListerSynced: revInformer.Informer().HasSynced,
 	}
 
+	// 注册 Pod 资源对象的 Event Callback
+	// NOTE: 所有的 Pod 相关的回调处理中，都是努力得到 Pod 所属的 StatefulSet，然后调用 enqueueStatefulSet()。
+	// ** 其思想是，任何有关的资源最终都是应该走唯一的一个协调流程 **
 	podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		// lookup the statefulset and enqueue
 		AddFunc: ssc.addPod,
@@ -119,6 +134,8 @@ func NewStatefulSetController(
 	ssc.podLister = podInformer.Lister()
 	ssc.podListerSynced = podInformer.Informer().HasSynced
 
+	// 注册 StatefulSet 资源对象的 Event Callback
+	// Add/Update/Delete 都走 enqueueStatefulSet() 方法
 	setInformer.Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: ssc.enqueueStatefulSet,
@@ -140,6 +157,8 @@ func NewStatefulSetController(
 	return ssc
 }
 
+// Run 启动 Controller
+//
 // Run runs the statefulset controller.
 func (ssc *StatefulSetController) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
@@ -148,10 +167,13 @@ func (ssc *StatefulSetController) Run(workers int, stopCh <-chan struct{}) {
 	klog.Infof("Starting stateful set controller")
 	defer klog.Infof("Shutting down statefulset controller")
 
+	// 等待需要查询资源的 Informer 缓存同步
 	if !cache.WaitForNamedCacheSync("stateful set", stopCh, ssc.podListerSynced, ssc.setListerSynced, ssc.pvcListerSynced, ssc.revListerSynced) {
 		return
 	}
 
+	// 启动多个 worker
+	// 每个 worker 会对 queue 消费并处理
 	for i := 0; i < workers; i++ {
 		go wait.Until(ssc.worker, time.Second, stopCh)
 	}
@@ -159,10 +181,14 @@ func (ssc *StatefulSetController) Run(workers int, stopCh <-chan struct{}) {
 	<-stopCh
 }
 
+// addPod 处理 Pod 资源对象的 Add Event
+//
 // addPod adds the statefulset for the pod to the sync queue
 func (ssc *StatefulSetController) addPod(obj interface{}) {
 	pod := obj.(*v1.Pod)
 
+	// 如果 Pod 的 DeletionTimestamp 不为 nil，表明 Pod 已经被请求删除
+	// 那么走 Delete Event Callback
 	if pod.DeletionTimestamp != nil {
 		// on a restart of the controller manager, it's possible a new pod shows up in a state that
 		// is already pending deletion. Prevent the pod from being a creation observation.
@@ -170,51 +196,67 @@ func (ssc *StatefulSetController) addPod(obj interface{}) {
 		return
 	}
 
+	// 读取 ControllerRef，即读取 `.metadata.ownerReferences` 字段
 	// If it has a ControllerRef, that's all that matters.
 	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil {
+		// 解析 Pod 所属的 StatefulSet
 		set := ssc.resolveControllerRef(pod.Namespace, controllerRef)
 		if set == nil {
-			return
+			return // 不属于 StatefulSet 管，直接返回
 		}
 		klog.V(4).Infof("Pod %s created, labels: %+v", pod.Name, pod.Labels)
+
+		// 转化为 Sync StatefulSet
 		ssc.enqueueStatefulSet(set)
 		return
 	}
 
+	// 如果 Pod 没有 Controller 管理，通过 StatefulSet 来查找 Pod
 	// Otherwise, it's an orphan. Get a list of all matching controllers and sync
 	// them to see if anyone wants to adopt it.
 	sets := ssc.getStatefulSetsForPod(pod)
 	if len(sets) == 0 {
 		return
 	}
+
+	// 还能查到对应的 StatefulSet，那么就处理这个 Orphan Pod
 	klog.V(4).Infof("Orphan Pod %s created, labels: %+v", pod.Name, pod.Labels)
 	for _, set := range sets {
 		ssc.enqueueStatefulSet(set)
 	}
 }
 
+// updatePod 处理 Pod 资源对象的 Update Event
+//
 // updatePod adds the statefulset for the current and old pods to the sync queue.
 func (ssc *StatefulSetController) updatePod(old, cur interface{}) {
 	curPod := cur.(*v1.Pod)
 	oldPod := old.(*v1.Pod)
+
+	// 通过 `metadata.resourceVersion` 判断 Pod 是否真正 Update
+	// 这里过滤了周期性 Resync 调用 Update 的情况（因为 StatefulSet 只需要周期性 Resync StatefulSet 对象，而不需要处理 Pod 对象）
 	if curPod.ResourceVersion == oldPod.ResourceVersion {
 		// In the event of a re-list we may receive update events for all known pods.
 		// Two different versions of the same pod will always have different RVs.
 		return
 	}
 
+	// 判断 Label 是否变更
 	labelChanged := !reflect.DeepEqual(curPod.Labels, oldPod.Labels)
 
+	// 判断 ControllerRef 是否变更
 	curControllerRef := metav1.GetControllerOf(curPod)
 	oldControllerRef := metav1.GetControllerOf(oldPod)
 	controllerRefChanged := !reflect.DeepEqual(curControllerRef, oldControllerRef)
 	if controllerRefChanged && oldControllerRef != nil {
+		// 如果 ControllerRef 变更了，那么先进行 Sync 老的 StatefulSet
 		// The ControllerRef was changed. Sync the old controller, if any.
 		if set := ssc.resolveControllerRef(oldPod.Namespace, oldControllerRef); set != nil {
 			ssc.enqueueStatefulSet(set)
 		}
 	}
 
+	// 能够解析出 ControllerRef，如果是 StatefulSet，那么 Sync
 	// If it has a ControllerRef, that's all that matters.
 	if curControllerRef != nil {
 		set := ssc.resolveControllerRef(curPod.Namespace, curControllerRef)
@@ -235,6 +277,7 @@ func (ssc *StatefulSetController) updatePod(old, cur interface{}) {
 		return
 	}
 
+	// 到这里，不能解析出 ControllerRef，那么从 StatefulSet 尝试查找该 Pod
 	// Otherwise, it's an orphan. If anything changed, sync matching controllers
 	// to see if anyone wants to adopt it now.
 	if labelChanged || controllerRefChanged {
@@ -249,10 +292,14 @@ func (ssc *StatefulSetController) updatePod(old, cur interface{}) {
 	}
 }
 
+// deletePod 处理 Pod Delete Event
 // deletePod enqueues the statefulset for the pod accounting for deletion tombstones.
 func (ssc *StatefulSetController) deletePod(obj interface{}) {
 	pod, ok := obj.(*v1.Pod)
 
+	// 如果 obj 不是 Pod 类型，那么可能是一个 delete event 丢弃了，然后 relist 后重新触发了。
+	// 这种情况下，会以 tombstone object 方式调用回调，因此需要进一步转换判断
+	//
 	// When a delete is dropped, the relist will notice a pod in the store not
 	// in the list, leading to the insertion of a tombstone object which contains
 	// the deleted key/value. Note that this value might be stale.
@@ -269,6 +316,7 @@ func (ssc *StatefulSetController) deletePod(obj interface{}) {
 		}
 	}
 
+	// 解析 Controller，转化为 StatefulSet
 	controllerRef := metav1.GetControllerOf(pod)
 	if controllerRef == nil {
 		// No controller should care about orphans being deleted.
@@ -279,6 +327,8 @@ func (ssc *StatefulSetController) deletePod(obj interface{}) {
 		return
 	}
 	klog.V(4).Infof("Pod %s/%s deleted through %v.", pod.Namespace, pod.Name, utilruntime.GetCaller())
+
+	// 依旧入队
 	ssc.enqueueStatefulSet(set)
 }
 
@@ -319,6 +369,8 @@ func (ssc *StatefulSetController) canAdoptFunc(set *apps.StatefulSet) func() err
 	})
 }
 
+// adoptOrphanRevisions 尝试处理 StatefulSet 对象对应的 Orphan Pod
+// 
 // adoptOrphanRevisions adopts any orphaned ControllerRevisions matched by set's Selector.
 func (ssc *StatefulSetController) adoptOrphanRevisions(set *apps.StatefulSet) error {
 	revisions, err := ssc.control.ListRevisions(set)
@@ -341,6 +393,7 @@ func (ssc *StatefulSetController) adoptOrphanRevisions(set *apps.StatefulSet) er
 	return nil
 }
 
+// getStatefulSetsForPod 通过 StatefulSet 来判断一个 Pod 所属于的 StatefulSet
 // getStatefulSetsForPod returns a list of StatefulSets that potentially match
 // a given pod.
 func (ssc *StatefulSetController) getStatefulSetsForPod(pod *v1.Pod) []*apps.StatefulSet {
@@ -360,19 +413,26 @@ func (ssc *StatefulSetController) getStatefulSetsForPod(pod *v1.Pod) []*apps.Sta
 	return sets
 }
 
+// resolveControllerRef 解析 metav1.OwnerReference，尝试将其变为 StatefulSet
+//
 // resolveControllerRef returns the controller referenced by a ControllerRef,
 // or nil if the ControllerRef could not be resolved to a matching controller
 // of the correct Kind.
 func (ssc *StatefulSetController) resolveControllerRef(namespace string, controllerRef *metav1.OwnerReference) *apps.StatefulSet {
+	// 对比 Kind
 	// We can't look up by UID, so look up by Name and then verify UID.
 	// Don't even try to look up by Name if it's the wrong Kind.
 	if controllerRef.Kind != controllerKind.Kind {
 		return nil
 	}
+
+	// 查找对应 Name StatefulSet 是否还存在
 	set, err := ssc.setLister.StatefulSets(namespace).Get(controllerRef.Name)
 	if err != nil {
 		return nil
 	}
+
+	// 对比查到的 StatefulSet 还是否是同一个（通过 UID 判断）
 	if set.UID != controllerRef.UID {
 		// The controller we found with this Name is not the same one that the
 		// ControllerRef points to.
@@ -381,8 +441,13 @@ func (ssc *StatefulSetController) resolveControllerRef(namespace string, control
 	return set
 }
 
+// enqueueStatefulSet 将一个 StatefulSet 对象入队，异步对齐进行协调
+//
 // enqueueStatefulSet enqueues the given statefulset in the work queue.
 func (ssc *StatefulSetController) enqueueStatefulSet(obj interface{}) {
+	// 得到 obj 对应的 key
+	// NOTE: 正常情况下，key 为 <namespace>/<name> 或者 <name>
+	// 对应的，使用 cache.SplitMetaNamespaceKey(key) 可以解析出 namespace 与 name
 	key, err := controller.KeyFunc(obj)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %+v: %v", obj, err))
@@ -401,29 +466,43 @@ func (ssc *StatefulSetController) enqueueSSAfter(ss *apps.StatefulSet, duration 
 	ssc.queue.AddAfter(key, duration)
 }
 
+// processNextWorkItem 从 queue 出队一个元素，并进行处理
+//
 // processNextWorkItem dequeues items, processes them, and marks them done. It enforces that the syncHandler is never
 // invoked concurrently with the same key.
 func (ssc *StatefulSetController) processNextWorkItem() bool {
+	// 读取一个 key
 	key, quit := ssc.queue.Get()
 	if quit {
 		return false
 	}
+
+	// 必须调用 queue.Done() 出队
+	// 执行失败的情况下，会重新入队，因此 defer 里执行出队操作
 	defer ssc.queue.Done(key)
+
+	// 执行 sync
 	if err := ssc.sync(key.(string)); err != nil {
 		utilruntime.HandleError(fmt.Errorf("error syncing StatefulSet %v, requeuing: %v", key.(string), err))
-		ssc.queue.AddRateLimited(key)
+		ssc.queue.AddRateLimited(key) // 执行失败的情况下，重新入队，但是 Rate Limit
 	} else {
-		ssc.queue.Forget(key)
+		ssc.queue.Forget(key) // 执行成功，queue.Forget() 重置 key 对应的限速值
 	}
 	return true
 }
 
+// worker 是每个 goroutine 执行的循环
+//
 // worker runs a worker goroutine that invokes processNextWorkItem until the controller's queue is closed
 func (ssc *StatefulSetController) worker() {
+	// 从 queue 中读取 key，并执行 sync
+	// 永久循环
 	for ssc.processNextWorkItem() {
 	}
 }
 
+// sync 对指定 key 的 StatefulSet 执行 sync
+//
 // sync syncs the given statefulset.
 func (ssc *StatefulSetController) sync(key string) error {
 	startTime := time.Now()
@@ -431,10 +510,13 @@ func (ssc *StatefulSetController) sync(key string) error {
 		klog.V(4).Infof("Finished syncing statefulset %q (%v)", key, time.Since(startTime))
 	}()
 
+	// 解析 key，得到 namespace 与 name
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		return err
 	}
+
+	// 根据 namespace name 得到对应的 StatefulSet
 	set, err := ssc.setLister.StatefulSets(namespace).Get(name)
 	if errors.IsNotFound(err) {
 		klog.Infof("StatefulSet has been deleted %v", key)
@@ -445,6 +527,7 @@ func (ssc *StatefulSetController) sync(key string) error {
 		return err
 	}
 
+	// 根据 ".spec.selector" 得到 Selector 对象
 	selector, err := metav1.LabelSelectorAsSelector(set.Spec.Selector)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("error converting StatefulSet %v selector: %v", key, err))

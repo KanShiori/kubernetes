@@ -29,7 +29,10 @@ import (
 	"k8s.io/klog/v2"
 )
 
-func (r *streamingRuntime) portForward(podSandboxID string, port int32, stream io.ReadWriteCloser) error {
+// portForward 设定将 stream 输入转发到 pod 的 tcp4 port, 并将结果从 stream 返回
+func (r *streamingRuntime) portForward(podSandboxID string, port int32,
+	stream io.ReadWriteCloser) error {
+	// 得到 pause 容器信息, 主要是其 pid
 	container, err := r.client.InspectContainer(podSandboxID)
 	if err != nil {
 		return err
@@ -39,13 +42,16 @@ func (r *streamingRuntime) portForward(podSandboxID string, port int32, stream i
 		return fmt.Errorf("container not running (%s)", container.ID)
 	}
 
+	// 拼接命令行 nsenter -t [container_pid] -n socat - TCP4:localhost:[port]
+	// 通过 socat, 对应命令的 stdin 都会转发到 TCP4:localhost:[port]
 	containerPid := container.State.Pid
 	socatPath, lookupErr := exec.LookPath("socat")
 	if lookupErr != nil {
 		return fmt.Errorf("unable to do port forwarding: socat not found")
 	}
 
-	args := []string{"-t", fmt.Sprintf("%d", containerPid), "-n", socatPath, "-", fmt.Sprintf("TCP4:localhost:%d", port)}
+	args := []string{"-t", fmt.Sprintf("%d", containerPid), "-n",
+	 socatPath, "-", fmt.Sprintf("TCP4:localhost:%d", port)}
 
 	nsenterPath, lookupErr := exec.LookPath("nsenter")
 	if lookupErr != nil {
@@ -55,12 +61,15 @@ func (r *streamingRuntime) portForward(podSandboxID string, port int32, stream i
 	commandString := fmt.Sprintf("%s %s", nsenterPath, strings.Join(args, " "))
 	klog.V(4).InfoS("Executing port forwarding command", "command", commandString)
 
+	// 创建命令, 设置结果返回给 [stream]
+	// stderr 用于判断命令错误退出信息
 	command := exec.Command(nsenterPath, args...)
 	command.Stdout = stream
 
 	stderr := new(bytes.Buffer)
 	command.Stderr = stderr
 
+	// 通过 StdinPipe() 与 io.Copy() 不断转发从 [stream] 的数据
 	// If we use Stdin, command.Run() won't return until the goroutine that's copying
 	// from stream finishes. Unfortunately, if you have a client like telnet connected
 	// via port forwarding, as long as the user's telnet client is connected to the user's
@@ -79,6 +88,7 @@ func (r *streamingRuntime) portForward(podSandboxID string, port int32, stream i
 		inPipe.Close()
 	}()
 
+	// 运行 command
 	if err := command.Run(); err != nil {
 		return fmt.Errorf("%v: %s", err, stderr.String())
 	}

@@ -24,13 +24,15 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// alwaysAllowDelayFiveSeconds 是一个 v1 AdmissionReview Handler，sleep 5s 后返回 allowed response
+//
 // alwaysAllowDelayFiveSeconds sleeps for five seconds and allows all requests made to this function.
 func alwaysAllowDelayFiveSeconds(ar v1.AdmissionReview) *v1.AdmissionResponse {
 	klog.V(2).Info("always-allow-with-delay sleeping for 5 seconds")
 	time.Sleep(5 * time.Second)
 	klog.V(2).Info("calling always-allow")
 	reviewResponse := v1.AdmissionResponse{}
-	reviewResponse.Allowed = true
+	reviewResponse.Allowed = true // 设置 Response.Allowed 为 true，表明请求允许
 	reviewResponse.Result = &metav1.Status{Message: "this webhook allows all requests"}
 	return &reviewResponse
 }

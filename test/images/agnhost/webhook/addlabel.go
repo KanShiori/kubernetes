@@ -36,6 +36,8 @@ const (
      ]`
 )
 
+// addLabel 是一个 v1 AdmissionReview Handler，用于添加一些 label
+//
 // Add a label {"added-label": "yes"} to the object
 func addLabel(ar v1.AdmissionReview) *v1.AdmissionResponse {
 	klog.V(2).Info("calling add-label")
@@ -52,6 +54,8 @@ func addLabel(ar v1.AdmissionReview) *v1.AdmissionResponse {
 	reviewResponse := v1.AdmissionResponse{}
 	reviewResponse.Allowed = true
 
+	// add/update label
+	// 通过 Patch JSON 来 更新对象
 	pt := v1.PatchTypeJSONPatch
 	labelValue, hasLabel := obj.ObjectMeta.Labels["added-label"]
 	switch {

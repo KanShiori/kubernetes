@@ -41,15 +41,22 @@ type Executor interface {
 // ServeExec handles requests to execute a command in a container. After
 // creating/receiving the required streams, it delegates the actual execution
 // to the executor.
-func ServeExec(w http.ResponseWriter, req *http.Request, executor Executor, podName string, uid types.UID, container string, cmd []string, streamOpts *Options, idleTimeout, streamCreationTimeout time.Duration, supportedProtocols []string) {
-	ctx, ok := createStreams(req, w, streamOpts, supportedProtocols, idleTimeout, streamCreationTimeout)
+func ServeExec(w http.ResponseWriter, req *http.Request,
+	executor Executor, podName string, uid types.UID, container string, cmd []string,
+	streamOpts *Options, idleTimeout, streamCreationTimeout time.Duration, supportedProtocols []string) {
+
+	// - 基于 [req] 与 [w] 创建 stream
+	ctx, ok := createStreams(req, w, streamOpts, supportedProtocols,
+		idleTimeout, streamCreationTimeout)
 	if !ok {
 		// error is handled by createStreams
 		return
 	}
 	defer ctx.conn.Close()
 
-	err := executor.ExecInContainer(podName, uid, container, cmd, ctx.stdinStream, ctx.stdoutStream, ctx.stderrStream, ctx.tty, ctx.resizeChan, 0)
+	// - 调用 [executor].ExecInContainer 接口(实际上是 dockershim.streamingRuntime.Exec 接口)
+	err := executor.ExecInContainer(podName, uid, container, cmd,
+		ctx.stdinStream, ctx.stdoutStream, ctx.stderrStream, ctx.tty, ctx.resizeChan, 0)
 	if err != nil {
 		if exitErr, ok := err.(utilexec.ExitError); ok && exitErr.Exited() {
 			rc := exitErr.ExitStatus()

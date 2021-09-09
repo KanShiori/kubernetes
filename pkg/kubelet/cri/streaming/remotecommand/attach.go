@@ -39,14 +39,19 @@ type Attacher interface {
 // ServeAttach handles requests to attach to a container. After creating/receiving the required
 // streams, it delegates the actual attaching to attacher.
 func ServeAttach(w http.ResponseWriter, req *http.Request, attacher Attacher, podName string, uid types.UID, container string, streamOpts *Options, idleTimeout, streamCreationTimeout time.Duration, supportedProtocols []string) {
-	ctx, ok := createStreams(req, w, streamOpts, supportedProtocols, idleTimeout, streamCreationTimeout)
+	// - 创建基于 HTTP 的长连接 stream（websocket or http.Hijack）
+	ctx, ok := createStreams(req, w, streamOpts, supportedProtocols,
+		idleTimeout, streamCreationTimeout)
 	if !ok {
 		// error is handled by createStreams
 		return
 	}
 	defer ctx.conn.Close()
 
-	err := attacher.AttachContainer(podName, uid, container, ctx.stdinStream, ctx.stdoutStream, ctx.stderrStream, ctx.tty, ctx.resizeChan)
+	// - 调用 [attacher].AttachContainer 接口(实际上是 dockershim.streamingRuntime.Attach 接口)
+	err := attacher.AttachContainer(podName, uid, container,
+		ctx.stdinStream, ctx.stdoutStream, ctx.stderrStream,
+		 ctx.tty, ctx.resizeChan)
 	if err != nil {
 		err = fmt.Errorf("error attaching to container: %v", err)
 		runtime.HandleError(err)
