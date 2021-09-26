@@ -28,6 +28,8 @@ import (
 	"k8s.io/client-go/util/retry"
 )
 
+// StatefulSetStatusUpdaterInterface 抽象出 StatefulSet UpdateStatus 操作
+//
 // StatefulSetStatusUpdaterInterface is an interface used to update the StatefulSetStatus associated with a StatefulSet.
 // For any use other than testing, clients should create an instance using NewRealStatefulSetStatusUpdater.
 type StatefulSetStatusUpdaterInterface interface {
@@ -49,11 +51,13 @@ type realStatefulSetStatusUpdater struct {
 	setLister appslisters.StatefulSetLister
 }
 
+// UpdateStatefulSetStatus 更新 StatefulSet Status
 func (ssu *realStatefulSetStatusUpdater) UpdateStatefulSetStatus(
 	set *apps.StatefulSet,
 	status *apps.StatefulSetStatus) error {
 	// don't wait due to limited number of clients, but backoff after the default number of steps
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// 调用 UpdateStatus 更新
 		set.Status = *status
 		_, updateErr := ssu.client.AppsV1().StatefulSets(set.Namespace).UpdateStatus(context.TODO(), set, metav1.UpdateOptions{})
 		if updateErr == nil {

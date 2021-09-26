@@ -132,6 +132,8 @@ func storageMatches(set *apps.StatefulSet, pod *v1.Pod) bool {
 	return true
 }
 
+// getPersistentVolumeClaims 读取 Pod 所需的 PVC，StatefulSet.Spec.VolumeClaimTemplates 中所有 PVC 会创建一份
+//
 // getPersistentVolumeClaims gets a map of PersistentVolumeClaims to their template names, as defined in set. The
 // returned PersistentVolumeClaims are each constructed with a the name specific to the Pod. This name is determined
 // by getPersistentVolumeClaimName.
@@ -139,6 +141,8 @@ func getPersistentVolumeClaims(set *apps.StatefulSet, pod *v1.Pod) map[string]v1
 	ordinal := getOrdinal(pod)
 	templates := set.Spec.VolumeClaimTemplates
 	claims := make(map[string]v1.PersistentVolumeClaim, len(templates))
+
+	// 遍历 .Spec.VolumeClaimTemplates，按照 <template-name>-<pod>-<ordinal> 生成 PVC
 	for i := range templates {
 		claim := templates[i]
 		claim.Name = getPersistentVolumeClaimName(set, &claim, ordinal)
@@ -315,6 +319,7 @@ func getPatch(set *apps.StatefulSet) ([]byte, error) {
 // ControllerRevision is valid. StatefulSet revisions are stored as patches that re-apply the current state of set
 // to a new StatefulSet using a strategic merge patch to replace the saved state of the new StatefulSet.
 func newRevision(set *apps.StatefulSet, revision int64, collisionCount *int32) (*apps.ControllerRevision, error) {
+	// 创建 ControllerRevision 对象
 	patch, err := getPatch(set)
 	if err != nil {
 		return nil, err
@@ -328,6 +333,8 @@ func newRevision(set *apps.StatefulSet, revision int64, collisionCount *int32) (
 	if err != nil {
 		return nil, err
 	}
+
+	// 继承 Annotation
 	if cr.ObjectMeta.Annotations == nil {
 		cr.ObjectMeta.Annotations = make(map[string]string)
 	}

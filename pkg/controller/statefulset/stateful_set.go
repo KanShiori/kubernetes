@@ -52,6 +52,7 @@ import (
 var controllerKind = apps.SchemeGroupVersion.WithKind("StatefulSet")
 
 // StatefulSetController 控制 StatefulSet
+//
 // StatefulSetController controls statefulsets.
 type StatefulSetController struct {
 	// client interface
@@ -332,12 +333,16 @@ func (ssc *StatefulSetController) deletePod(obj interface{}) {
 	ssc.enqueueStatefulSet(set)
 }
 
+// getPodsForStatefulSet 获取 StatefulSet 所管理的 Pod
+//
 // getPodsForStatefulSet returns the Pods that a given StatefulSet should manage.
 // It also reconciles ControllerRef by adopting/orphaning.
 //
 // NOTE: Returned Pods are pointers to objects from the cache.
 //       If you need to modify one, you need to copy it first.
 func (ssc *StatefulSetController) getPodsForStatefulSet(set *apps.StatefulSet, selector labels.Selector) ([]*v1.Pod, error) {
+	// 列出所有 Pod
+	// 因为还要判断可能 adopting/orphaning Pod
 	// List all pods to include the pods that don't match the selector anymore but
 	// has a ControllerRef pointing to this StatefulSet.
 	pods, err := ssc.podLister.Pods(set.Namespace).List(labels.Everything())
@@ -345,6 +350,7 @@ func (ssc *StatefulSetController) getPodsForStatefulSet(set *apps.StatefulSet, s
 		return nil, err
 	}
 
+	// filter 用于过滤 Pod
 	filter := func(pod *v1.Pod) bool {
 		// Only claim if it matches our StatefulSet name. Otherwise release/ignore.
 		return isMemberOf(set, pod)
@@ -528,6 +534,7 @@ func (ssc *StatefulSetController) sync(key string) error {
 	}
 
 	// 根据 ".spec.selector" 得到 Selector 对象
+	// 因此，StatefulSet 的 spec.Selector 决定了其所管理的 Pod
 	selector, err := metav1.LabelSelectorAsSelector(set.Spec.Selector)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("error converting StatefulSet %v selector: %v", key, err))
@@ -539,14 +546,18 @@ func (ssc *StatefulSetController) sync(key string) error {
 		return err
 	}
 
+	// 获取 StatefulSet 所管理的所有 Pod
 	pods, err := ssc.getPodsForStatefulSet(set, selector)
 	if err != nil {
 		return err
 	}
 
+	// 核心 sync 逻辑
 	return ssc.syncStatefulSet(set, pods)
 }
 
+// syncStatefulSet sync StatefulSet 与其所有管理的 Pod
+//
 // syncStatefulSet syncs a tuple of (statefulset, []*v1.Pod).
 func (ssc *StatefulSetController) syncStatefulSet(set *apps.StatefulSet, pods []*v1.Pod) error {
 	klog.V(4).Infof("Syncing StatefulSet %v/%v with %d pods", set.Namespace, set.Name, len(pods))
