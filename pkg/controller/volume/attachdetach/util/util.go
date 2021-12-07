@@ -200,6 +200,7 @@ func ProcessPodVolumes(pod *v1.Pod, addVolumes bool, desiredStateOfWorld cache.D
 		return
 	}
 
+	// 如果 Pod 没有使用 Volume，啥也不干
 	if len(pod.Spec.Volumes) <= 0 {
 		klog.V(10).Infof("Skipping processing of pod %q/%q: it has no volumes.",
 			pod.Namespace,
@@ -207,6 +208,7 @@ func ProcessPodVolumes(pod *v1.Pod, addVolumes bool, desiredStateOfWorld cache.D
 		return
 	}
 
+	// 查询是否调度到了一个存在的 Node
 	nodeName := types.NodeName(pod.Spec.NodeName)
 	if nodeName == "" {
 		klog.V(10).Infof(
@@ -226,8 +228,10 @@ func ProcessPodVolumes(pod *v1.Pod, addVolumes bool, desiredStateOfWorld cache.D
 		return
 	}
 
+	// 处理 Pod Spec 中的 Volume
 	// Process volume spec for each volume defined in pod
 	for _, podVolume := range pod.Spec.Volumes {
+		// 创建 Volume 对象
 		volumeSpec, err := CreateVolumeSpec(podVolume, pod, nodeName, volumePluginMgr, pvcLister, pvLister, csiMigratedPluginManager, csiTranslator)
 		if err != nil {
 			klog.V(10).Infof(
@@ -239,6 +243,7 @@ func ProcessPodVolumes(pod *v1.Pod, addVolumes bool, desiredStateOfWorld cache.D
 			continue
 		}
 
+		// 找到对应的 CSI Plugin
 		attachableVolumePlugin, err :=
 			volumePluginMgr.FindAttachablePluginBySpec(volumeSpec)
 		if err != nil || attachableVolumePlugin == nil {
@@ -253,6 +258,7 @@ func ProcessPodVolumes(pod *v1.Pod, addVolumes bool, desiredStateOfWorld cache.D
 
 		uniquePodName := util.GetUniquePodName(pod)
 		if addVolumes {
+			// 添加 Volume 到 desiredStateOfWorld
 			// Add volume to desired state of world
 			_, err := desiredStateOfWorld.AddPod(
 				uniquePodName, pod, volumeSpec, nodeName)
@@ -266,6 +272,7 @@ func ProcessPodVolumes(pod *v1.Pod, addVolumes bool, desiredStateOfWorld cache.D
 			}
 
 		} else {
+			// 移除 Volume 从 desiredStateOfWorld
 			// Remove volume from desired state of world
 			uniqueVolumeName, err := util.GetUniqueVolumeNameFromSpec(
 				attachableVolumePlugin, volumeSpec)
@@ -282,6 +289,8 @@ func ProcessPodVolumes(pod *v1.Pod, addVolumes bool, desiredStateOfWorld cache.D
 				uniquePodName, uniqueVolumeName, nodeName)
 		}
 	}
+
+	// 后续异步处理 Pod 的 Volume
 	return
 }
 

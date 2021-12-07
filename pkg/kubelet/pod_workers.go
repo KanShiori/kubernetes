@@ -658,7 +658,7 @@ func (p *podWorkers) UpdatePod(options UpdatePodOptions) {
 	var podUpdates chan podWork
 	var exists bool
 	if podUpdates, exists = p.podUpdates[uid]; !exists {
-		// 记录pod goroutine使用的channel
+		// 记录 pod goroutine 使用的 channel
 		// We need to have a buffer here, because checkForUpdates() method that
 		// puts an update into channel is called from the same goroutine where
 		// the channel is consumed. However, it is guaranteed that in such case
@@ -666,7 +666,7 @@ func (p *podWorkers) UpdatePod(options UpdatePodOptions) {
 		podUpdates = make(chan podWork, 1)
 		p.podUpdates[uid] = podUpdates
 
-		// 运行pod goroutine
+		// 运行 pod goroutine
 		// Creating a new pod worker either means this is a new pod, or that the
 		// kubelet just restarted. In either case the kubelet is willing to believe
 		// the status of the pod for the first pod worker sync. See corresponding

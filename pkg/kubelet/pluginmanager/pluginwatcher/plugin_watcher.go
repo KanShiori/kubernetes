@@ -30,6 +30,7 @@ import (
 	utilfs "k8s.io/kubernetes/pkg/util/filesystem"
 )
 
+// Watcher 监控 Plugin 的注册
 // Watcher is the plugin watcher
 type Watcher struct {
 	path                string
@@ -51,34 +52,40 @@ func NewWatcher(sockDir string, desiredStateOfWorld cache.DesiredStateOfWorld) *
 func (w *Watcher) Start(stopCh <-chan struct{}) error {
 	klog.V(2).InfoS("Plugin Watcher Start", "path", w.path)
 
+	// 创建根目录
 	// Creating the directory to be watched if it doesn't exist yet,
 	// and walks through the directory to discover the existing plugins.
 	if err := w.init(); err != nil {
 		return err
 	}
 
+	// 创建 fs watcher
 	fsWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to start plugin fsWatcher, err: %v", err)
 	}
 	w.fsWatcher = fsWatcher
 
+	// 扫描当前根目录
 	// Traverse plugin dir and add filesystem watchers before starting the plugin processing goroutine.
 	if err := w.traversePluginDir(w.path); err != nil {
 		klog.ErrorS(err, "Failed to traverse plugin socket path", "path", w.path)
 	}
 
+	// 启动监控文件系统的 Groutine
 	go func(fsWatcher *fsnotify.Watcher) {
 		for {
 			select {
 			case event := <-fsWatcher.Events:
 				//TODO: Handle errors by taking corrective measures
 				if event.Op&fsnotify.Create == fsnotify.Create {
+					// 处理文件创建事件
 					err := w.handleCreateEvent(event)
 					if err != nil {
 						klog.ErrorS(err, "Error when handling create event", "event", event)
 					}
 				} else if event.Op&fsnotify.Remove == fsnotify.Remove {
+					// 处理文件删除事件
 					w.handleDeleteEvent(event)
 				}
 				continue
@@ -110,11 +117,13 @@ func (w *Watcher) init() error {
 // Walks through the plugin directory discover any existing plugin sockets.
 // Ignore all errors except root dir not being walkable
 func (w *Watcher) traversePluginDir(dir string) error {
+	// 添加根目录的监控
 	// watch the new dir
 	err := w.fsWatcher.Add(dir)
 	if err != nil {
 		return fmt.Errorf("failed to watch %s, err: %v", w.path, err)
 	}
+	// 遍历根目录处理
 	// traverse existing children in the dir
 	return w.fs.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -133,10 +142,12 @@ func (w *Watcher) traversePluginDir(dir string) error {
 
 		switch mode := info.Mode(); {
 		case mode.IsDir():
+			// 根目录下的子目录页加入监控
 			if err := w.fsWatcher.Add(path); err != nil {
 				return fmt.Errorf("failed to watch %s, err: %v", path, err)
 			}
 		case mode&os.ModeSocket != 0:
+			// socket 文件进行处理
 			event := fsnotify.Event{
 				Name: path,
 				Op:   fsnotify.Create,
@@ -159,6 +170,7 @@ func (w *Watcher) traversePluginDir(dir string) error {
 func (w *Watcher) handleCreateEvent(event fsnotify.Event) error {
 	klog.V(6).InfoS("Handling create event", "event", event)
 
+	// stat file
 	fi, err := os.Stat(event.Name)
 	// TODO: This is a workaround for Windows 20H2 issue for os.Stat(). Please see
 	// microsoft/Windows-Containers#97 for details.
@@ -175,11 +187,14 @@ func (w *Watcher) handleCreateEvent(event fsnotify.Event) error {
 		return nil
 	}
 
+	// 如果是 socket 文件，注册到 desiredStateOfWorld
 	if !fi.IsDir() {
 		isSocket, err := util.IsUnixDomainSocket(util.NormalizePath(event.Name))
 		if err != nil {
 			return fmt.Errorf("failed to determine if file: %s is a unix domain socket: %v", event.Name, err)
 		}
+
+		// 忽略其他类型文件
 		if !isSocket {
 			klog.V(5).InfoS("Ignoring non socket file", "path", fi.Name())
 			return nil
@@ -188,6 +203,7 @@ func (w *Watcher) handleCreateEvent(event fsnotify.Event) error {
 		return w.handlePluginRegistration(event.Name)
 	}
 
+	// 如果是子目录，继续监控与处理
 	return w.traversePluginDir(event.Name)
 }
 

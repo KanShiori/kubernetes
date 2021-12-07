@@ -75,8 +75,10 @@ type ControllerParameters struct {
 	FilteredDialOptions       *proxyutil.FilteredDialOptions
 }
 
+// NewController 创建一个 PV Controller 对象
 // NewController creates a new PersistentVolume controller
 func NewController(p ControllerParameters) (*PersistentVolumeController, error) {
+	// 事件记录
 	eventRecorder := p.EventRecorder
 	if eventRecorder == nil {
 		broadcaster := record.NewBroadcaster()
@@ -85,6 +87,7 @@ func NewController(p ControllerParameters) (*PersistentVolumeController, error) 
 		eventRecorder = broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "persistentvolume-controller"})
 	}
 
+	// 构建 Controller 对象，基本的参数都来自于 ControllerParameters
 	controller := &PersistentVolumeController{
 		volumes:                       newPersistentVolumeOrderedIndex(),
 		claims:                        cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc),
@@ -102,11 +105,13 @@ func NewController(p ControllerParameters) (*PersistentVolumeController, error) 
 		operationTimestamps:           metrics.NewOperationStartTimeCache(),
 	}
 
+	// 初始化所有的 Volume Plugin
 	// Prober is nil because PV is not aware of Flexvolume.
 	if err := controller.volumePluginMgr.InitPlugins(p.VolumePlugins, nil /* prober */, controller); err != nil {
 		return nil, fmt.Errorf("could not initialize volume plugins for PersistentVolume Controller: %w", err)
 	}
 
+	// 监听 PV 事件，注册回调
 	p.VolumeInformer.Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    func(obj interface{}) { controller.enqueueWork(controller.volumeQueue, obj) },
@@ -117,6 +122,7 @@ func NewController(p ControllerParameters) (*PersistentVolumeController, error) 
 	controller.volumeLister = p.VolumeInformer.Lister()
 	controller.volumeListerSynced = p.VolumeInformer.Informer().HasSynced
 
+	// 监听 PVC 事件，注册回调
 	p.ClaimInformer.Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    func(obj interface{}) { controller.enqueueWork(controller.claimQueue, obj) },
@@ -127,6 +133,7 @@ func NewController(p ControllerParameters) (*PersistentVolumeController, error) 
 	controller.claimLister = p.ClaimInformer.Lister()
 	controller.claimListerSynced = p.ClaimInformer.Informer().HasSynced
 
+	// 其他的资源的 Lister
 	controller.classLister = p.ClassInformer.Lister()
 	controller.classListerSynced = p.ClassInformer.Informer().HasSynced
 	controller.podLister = p.PodInformer.Lister()
@@ -135,6 +142,7 @@ func NewController(p ControllerParameters) (*PersistentVolumeController, error) 
 	controller.NodeLister = p.NodeInformer.Lister()
 	controller.NodeListerSynced = p.NodeInformer.Informer().HasSynced
 
+	// 初始化 Indexer，记录 Pod 与 PVC 的关系
 	// This custom indexer will index pods by its PVC keys. Then we don't need
 	// to iterate all pods every time to find pods which reference given PVC.
 	if err := common.AddPodPVCIndexerIfNotPresent(controller.podIndexer); err != nil {
@@ -308,12 +316,15 @@ func (ctrl *PersistentVolumeController) Run(stopCh <-chan struct{}) {
 	klog.Infof("Starting persistent volume controller")
 	defer klog.Infof("Shutting down persistent volume controller")
 
+	// 等待 cache 填充
 	if !cache.WaitForNamedCacheSync("persistent volume", stopCh, ctrl.volumeListerSynced, ctrl.claimListerSynced, ctrl.classListerSynced, ctrl.podListerSynced, ctrl.NodeListerSynced) {
 		return
 	}
 
+	// 初始化 ctrl.Store
 	ctrl.initializeCaches(ctrl.volumeLister, ctrl.claimLister)
 
+	// 执行各个工作函数
 	go wait.Until(ctrl.resync, ctrl.resyncPeriod, stopCh)
 	go wait.Until(ctrl.volumeWorker, time.Second, stopCh)
 	go wait.Until(ctrl.claimWorker, time.Second, stopCh)
@@ -425,7 +436,9 @@ func updateMigrationAnnotations(cmpm CSIMigratedPluginManager, translator CSINam
 // volumeWorker processes items from volumeQueue. It must run only once,
 // syncVolume is not assured to be reentrant.
 func (ctrl *PersistentVolumeController) volumeWorker() {
+	// 工作函数
 	workFunc := func() bool {
+		// 从队列中取出元素
 		keyObj, quit := ctrl.volumeQueue.Get()
 		if quit {
 			return true
@@ -434,13 +447,17 @@ func (ctrl *PersistentVolumeController) volumeWorker() {
 		key := keyObj.(string)
 		klog.V(5).Infof("volumeWorker[%s]", key)
 
+		// 解析出 namespace 与 name
 		_, name, err := cache.SplitMetaNamespaceKey(key)
 		if err != nil {
 			klog.V(4).Infof("error getting name of volume %q to get volume from informer: %v", key, err)
 			return false
 		}
+
+		// 查询 PV
 		volume, err := ctrl.volumeLister.Get(name)
 		if err == nil {
+			// 查询的到 PV，那么事件为 add/update/sync，调用 updateVolume 处理
 			// The volume still exists in informer cache, the event must have
 			// been add/update/sync
 			ctrl.updateVolume(volume)
@@ -451,6 +468,9 @@ func (ctrl *PersistentVolumeController) volumeWorker() {
 			return false
 		}
 
+		// PV 不存在，说明已经被删除
+
+		// 从自己的 Store 中查询，如果不存在所有 Controller 已经处理了该 PV 的删除
 		// The volume is not in informer cache, the event must have been
 		// "delete"
 		volumeObj, found, err := ctrl.volumes.store.GetByKey(key)
@@ -464,6 +484,8 @@ func (ctrl *PersistentVolumeController) volumeWorker() {
 			klog.V(2).Infof("deletion of volume %q was already processed", key)
 			return false
 		}
+
+		// 如果 Store 中找到，说明 PV 删除还未处理，调用 deleteVolume
 		volume, ok := volumeObj.(*v1.PersistentVolume)
 		if !ok {
 			klog.Errorf("expected volume, got %+v", volumeObj)
@@ -472,6 +494,8 @@ func (ctrl *PersistentVolumeController) volumeWorker() {
 		ctrl.deleteVolume(volume)
 		return false
 	}
+
+	// 永久执行工作函数，直到退出
 	for {
 		if quit := workFunc(); quit {
 			klog.Infof("volume worker queue shutting down")
@@ -543,6 +567,7 @@ func (ctrl *PersistentVolumeController) claimWorker() {
 func (ctrl *PersistentVolumeController) resync() {
 	klog.V(4).Infof("resyncing PV controller")
 
+	// List 所有 PVC，放入队列
 	pvcs, err := ctrl.claimLister.List(labels.NewSelector())
 	if err != nil {
 		klog.Warningf("cannot list claims: %s", err)
@@ -552,6 +577,7 @@ func (ctrl *PersistentVolumeController) resync() {
 		ctrl.enqueueWork(ctrl.claimQueue, pvc)
 	}
 
+	// List 所有 PV，放入队列
 	pvs, err := ctrl.volumeLister.List(labels.NewSelector())
 	if err != nil {
 		klog.Warningf("cannot list persistent volumes: %s", err)

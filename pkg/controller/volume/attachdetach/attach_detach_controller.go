@@ -104,6 +104,7 @@ type AttachDetachController interface {
 	GetDesiredStateOfWorld() cache.DesiredStateOfWorld
 }
 
+// NewAttachDetachController 创建一个 AttachDetach Controller
 // NewAttachDetachController returns a new instance of AttachDetachController.
 func NewAttachDetachController(
 	kubeClient clientset.Interface,
@@ -122,6 +123,7 @@ func NewAttachDetachController(
 	timerConfig TimerConfig,
 	filteredDialOptions *proxyutil.FilteredDialOptions) (AttachDetachController, error) {
 
+	// 构建对象
 	adc := &attachDetachController{
 		kubeClient:          kubeClient,
 		pvcLister:           pvcInformer.Lister(),
@@ -149,18 +151,20 @@ func NewAttachDetachController(
 	adc.volumeAttachmentLister = volumeAttachmentInformer.Lister()
 	adc.volumeAttachmentSynced = volumeAttachmentInformer.Informer().HasSynced
 
+	// 初始化 CSI 插件
 	if err := adc.volumePluginMgr.InitPlugins(plugins, prober, adc); err != nil {
 		return nil, fmt.Errorf("could not initialize volume plugins for Attach/Detach Controller: %w", err)
 	}
 
+	// event broadcaster
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartStructuredLogging(0)
 	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "attachdetach-controller"})
 	blkutil := volumepathhandler.NewBlockVolumePathHandler()
 
-	adc.desiredStateOfWorld = cache.NewDesiredStateOfWorld(&adc.volumePluginMgr)
-	adc.actualStateOfWorld = cache.NewActualStateOfWorld(&adc.volumePluginMgr)
+	adc.desiredStateOfWorld = cache.NewDesiredStateOfWorld(&adc.volumePluginMgr) // spec 指定的期望状态
+	adc.actualStateOfWorld = cache.NewActualStateOfWorld(&adc.volumePluginMgr)   // 实际状态
 	adc.attacherDetacher =
 		operationexecutor.NewOperationExecutor(operationexecutor.NewOperationGenerator(
 			kubeClient,
@@ -198,6 +202,7 @@ func NewAttachDetachController(
 		adc.csiMigratedPluginManager,
 		adc.intreeToCSITranslator)
 
+	// Watch Pod Event
 	podInformer.Informer().AddEventHandler(kcache.ResourceEventHandlerFuncs{
 		AddFunc:    adc.podAdd,
 		UpdateFunc: adc.podUpdate,
@@ -210,12 +215,14 @@ func NewAttachDetachController(
 		return nil, fmt.Errorf("could not initialize attach detach controller: %w", err)
 	}
 
+	// Watch Node Event
 	nodeInformer.Informer().AddEventHandler(kcache.ResourceEventHandlerFuncs{
 		AddFunc:    adc.nodeAdd,
 		UpdateFunc: adc.nodeUpdate,
 		DeleteFunc: adc.nodeDelete,
 	})
 
+	// Watch PVC Event
 	pvcInformer.Informer().AddEventHandler(kcache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			adc.enqueuePVC(obj)
@@ -339,18 +346,26 @@ func (adc *attachDetachController) Run(stopCh <-chan struct{}) {
 		synced = append(synced, adc.volumeAttachmentSynced)
 	}
 
+	// 填充 cache
 	if !kcache.WaitForNamedCacheSync("attach detach", stopCh, synced...) {
 		return
 	}
 
+	// 第一次填充 actualStateOfWorld
 	err := adc.populateActualStateOfWorld()
 	if err != nil {
 		klog.Errorf("Error populating the actual state of world: %v", err)
 	}
+	// 第一次填充 desiredStateOfworld
 	err = adc.populateDesiredStateOfWorld()
 	if err != nil {
 		klog.Errorf("Error populating the desired state of world: %v", err)
 	}
+
+	// 运行三个 worker
+	//	+ reconciler -
+	//	+ desiredStateOfWorldPopulator -
+	//	+ pvcWorker -
 	go adc.reconciler.Run(stopCh)
 	go adc.desiredStateOfWorldPopulator.Run(stopCh)
 	go wait.Until(adc.pvcWorker, time.Second, stopCh)
@@ -487,21 +502,26 @@ func (adc *attachDetachController) populateDesiredStateOfWorld() error {
 	return nil
 }
 
+// podAdd 处理 Pod 添加的回调
 func (adc *attachDetachController) podAdd(obj interface{}) {
 	pod, ok := obj.(*v1.Pod)
 	if pod == nil || !ok {
 		return
 	}
+
+	// 忽略还没有调度到 Node 的 Pod
 	if pod.Spec.NodeName == "" {
 		// Ignore pods without NodeName, indicating they are not scheduled.
 		return
 	}
 
+	// 决定是否是默认 Volume 行为是添加还是删除
 	volumeActionFlag := util.DetermineVolumeAction(
 		pod,
 		adc.desiredStateOfWorld,
 		true /* default volume action */)
 
+	// 处理 Pod 的 Volume
 	util.ProcessPodVolumes(pod, volumeActionFlag, /* addVolumes */
 		adc.desiredStateOfWorld, &adc.volumePluginMgr, adc.pvcLister, adc.pvLister, adc.csiMigratedPluginManager, adc.intreeToCSITranslator)
 }
@@ -511,35 +531,43 @@ func (adc *attachDetachController) GetDesiredStateOfWorld() cache.DesiredStateOf
 	return adc.desiredStateOfWorld
 }
 
+// podUpdate 处理 Pod 更新的回调
 func (adc *attachDetachController) podUpdate(oldObj, newObj interface{}) {
 	pod, ok := newObj.(*v1.Pod)
 	if pod == nil || !ok {
 		return
 	}
+
+	// 忽略还没有调度到 Node 的 Pod
 	if pod.Spec.NodeName == "" {
 		// Ignore pods without NodeName, indicating they are not scheduled.
 		return
 	}
 
+	// 决定是否是默认 Volume 行为是添加还是删除
 	volumeActionFlag := util.DetermineVolumeAction(
 		pod,
 		adc.desiredStateOfWorld,
 		true /* default volume action */)
 
+	// 处理 Pod 的 Volume
 	util.ProcessPodVolumes(pod, volumeActionFlag, /* addVolumes */
 		adc.desiredStateOfWorld, &adc.volumePluginMgr, adc.pvcLister, adc.pvLister, adc.csiMigratedPluginManager, adc.intreeToCSITranslator)
 }
 
+// podDelete 处理 Pod 删除的回调
 func (adc *attachDetachController) podDelete(obj interface{}) {
 	pod, ok := obj.(*v1.Pod)
 	if pod == nil || !ok {
 		return
 	}
 
+	// 处理 Pod 的 Volume 删除
 	util.ProcessPodVolumes(pod, false, /* addVolumes */
 		adc.desiredStateOfWorld, &adc.volumePluginMgr, adc.pvcLister, adc.pvLister, adc.csiMigratedPluginManager, adc.intreeToCSITranslator)
 }
 
+// nodeAdd 处理 Node 添加事件
 func (adc *attachDetachController) nodeAdd(obj interface{}) {
 	node, ok := obj.(*v1.Node)
 	// TODO: investigate if nodeName is empty then if we can return
@@ -548,7 +576,11 @@ func (adc *attachDetachController) nodeAdd(obj interface{}) {
 		return
 	}
 	nodeName := types.NodeName(node.Name)
+
+	// 转为 Node 的更新处理
 	adc.nodeUpdate(nil, obj)
+
+	// 更新 actualStateOfWorld 的 Node
 	// kubernetes/kubernetes/issues/37586
 	// This is to workaround the case when a node add causes to wipe out
 	// the attached volumes field. This function ensures that we sync with
@@ -556,6 +588,7 @@ func (adc *attachDetachController) nodeAdd(obj interface{}) {
 	adc.actualStateOfWorld.SetNodeStatusUpdateNeeded(nodeName)
 }
 
+// nodeUpdate 处理 Node 更新事件
 func (adc *attachDetachController) nodeUpdate(oldObj, newObj interface{}) {
 	node, ok := newObj.(*v1.Node)
 	// TODO: investigate if nodeName is empty then if we can return
@@ -564,31 +597,39 @@ func (adc *attachDetachController) nodeUpdate(oldObj, newObj interface{}) {
 	}
 
 	nodeName := types.NodeName(node.Name)
+	// Node 添加到 desiredStateOfWorld
 	adc.addNodeToDswp(node, nodeName)
+	// 处理 Node 上的 Volume
 	adc.processVolumesInUse(nodeName, node.Status.VolumesInUse)
 }
 
+// nodeDelete 处理 Node 删除事件
 func (adc *attachDetachController) nodeDelete(obj interface{}) {
 	node, ok := obj.(*v1.Node)
 	if node == nil || !ok {
 		return
 	}
 
+	// 从 desiredStateOfWorld 删除 Node
 	nodeName := types.NodeName(node.Name)
 	if err := adc.desiredStateOfWorld.DeleteNode(nodeName); err != nil {
 		// This might happen during drain, but we still want it to appear in our logs
 		klog.Infof("error removing node %q from desired-state-of-world: %v", nodeName, err)
 	}
 
+	// 处理 Node 上的 Volume
 	adc.processVolumesInUse(nodeName, node.Status.VolumesInUse)
 }
 
+// enqueuePVC 处理 PVC 的事件
 func (adc *attachDetachController) enqueuePVC(obj interface{}) {
 	key, err := kcache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 	if err != nil {
 		runtime.HandleError(fmt.Errorf("Couldn't get key for object %+v: %v", obj, err))
 		return
 	}
+
+	// 放到 pvcQueue 等待处理
 	adc.pvcQueue.Add(key)
 }
 
@@ -664,6 +705,7 @@ func (adc *attachDetachController) syncPVCByKey(key string) error {
 	return nil
 }
 
+// processVolumesInUse 处理 Node 的 Volume
 // processVolumesInUse processes the list of volumes marked as "in-use"
 // according to the specified Node's Status.VolumesInUse and updates the
 // corresponding volume in the actual state of the world to indicate that it is
@@ -671,14 +713,20 @@ func (adc *attachDetachController) syncPVCByKey(key string) error {
 func (adc *attachDetachController) processVolumesInUse(
 	nodeName types.NodeName, volumesInUse []v1.UniqueVolumeName) {
 	klog.V(4).Infof("processVolumesInUse for node %q", nodeName)
+
+	// 获取 Node 上已经 Attached Volume
 	for _, attachedVolume := range adc.actualStateOfWorld.GetAttachedVolumesForNode(nodeName) {
 		mounted := false
+
+		// 检查 Volume 是否是 Attached
 		for _, volumeInUse := range volumesInUse {
 			if attachedVolume.VolumeName == volumeInUse {
 				mounted = true
 				break
 			}
 		}
+
+		// 记录到 actualStateOfWorld
 		err := adc.actualStateOfWorld.SetVolumeMountedByNode(attachedVolume.VolumeName, nodeName, mounted)
 		if err != nil {
 			klog.Warningf(

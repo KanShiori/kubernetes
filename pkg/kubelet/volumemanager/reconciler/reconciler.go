@@ -51,6 +51,8 @@ import (
 	volumetypes "k8s.io/kubernetes/pkg/volume/util/types"
 )
 
+// Reconciler 周期性的协调 volume
+//
 // Reconciler runs a periodic loop to reconcile the desired state of the world
 // with the actual state of the world by triggering attach, detach, mount, and
 // unmount operations.
@@ -177,9 +179,12 @@ func (rc *reconciler) reconcile() {
 	rc.unmountDetachDevices()
 }
 
+// unmountVolumes umount 有需要的 volume
 func (rc *reconciler) unmountVolumes() {
+	// 遍历当前节点所有的 mounted volume
 	// Ensure volumes that should be unmounted are unmounted.
 	for _, mountedVolume := range rc.actualStateOfWorld.GetAllMountedVolumes() {
+		// 检查该 volume 与 pod 是否存在于 desiredStateOfWorld
 		if !rc.desiredStateOfWorld.PodExistsInVolume(mountedVolume.PodName, mountedVolume.VolumeName) {
 			// Volume is mounted, unmount it
 			klog.V(5).InfoS(mountedVolume.GenerateMsgDetailed("Starting operationExecutor.UnmountVolume", ""))
@@ -200,15 +205,18 @@ func (rc *reconciler) unmountVolumes() {
 }
 
 func (rc *reconciler) mountAttachVolumes() {
+	// 遍历 desiredStateOfWorld
 	// Ensure volumes that should be attached/mounted are attached/mounted.
 	for _, volumeToMount := range rc.desiredStateOfWorld.GetVolumesToMount() {
+		// 查询 actualStateOfWorld 对应的 volume 状态
 		volMounted, devicePath, err := rc.actualStateOfWorld.PodExistsInVolume(volumeToMount.PodName, volumeToMount.VolumeName)
 		volumeToMount.DevicePath = devicePath
+
 		if cache.IsVolumeNotAttachedError(err) {
+			// 如果 err 表明 volume 还未被 attache
+
 			if rc.controllerAttachDetachEnabled || !volumeToMount.PluginIsAttachable {
-				// Volume is not attached (or doesn't implement attacher), kubelet attach is disabled, wait
-				// for controller to finish attaching volume.
-				klog.V(5).InfoS(volumeToMount.GenerateMsgDetailed("Starting operationExecutor.VerifyControllerAttachedVolume", ""), "pod", klog.KObj(volumeToMount.Pod))
+				// volume 未被 attach，而 kubelet 不允许执行 attach 操作，那么等待 Contrller 进行 attach
 				err := rc.operationExecutor.VerifyControllerAttachedVolume(
 					volumeToMount.VolumeToMount,
 					rc.nodeName,
@@ -224,6 +232,7 @@ func (rc *reconciler) mountAttachVolumes() {
 					klog.InfoS(volumeToMount.GenerateMsgDetailed("operationExecutor.VerifyControllerAttachedVolume started", ""), "pod", klog.KObj(volumeToMount.Pod))
 				}
 			} else {
+				// volume 未被 attach，而 kubelet 允许进行 attach 操作，那么由 kubelet 调用 attach 操作
 				// Volume is not attached to node, kubelet attach is enabled, volume implements an attacher,
 				// so attach it
 				volumeToAttach := operationexecutor.VolumeToAttach{
@@ -245,6 +254,9 @@ func (rc *reconciler) mountAttachVolumes() {
 				}
 			}
 		} else if !volMounted || cache.IsRemountRequiredError(err) {
+			// 如果 volume 还未被 mount，或者 err 需要重新 mount
+
+			// 调用 MountVolume，底层会进行 MountDevice + SetUp 操作
 			// Volume is not mounted, or is already mounted, but requires remounting
 			remountingLogStr := ""
 			isRemount := cache.IsRemountRequiredError(err)
@@ -273,6 +285,9 @@ func (rc *reconciler) mountAttachVolumes() {
 			}
 		} else if cache.IsFSResizeRequiredError(err) &&
 			utilfeature.DefaultFeatureGate.Enabled(features.ExpandInUsePersistentVolumes) {
+			// 如果 volume 为需要扩容
+
+			// 调用 ExpandInUseVolume 进行扩容
 			klog.V(4).InfoS(volumeToMount.GenerateMsgDetailed("Starting operationExecutor.ExpandInUseVolume", ""), "pod", klog.KObj(volumeToMount.Pod))
 			err := rc.operationExecutor.ExpandInUseVolume(
 				volumeToMount.VolumeToMount,
@@ -292,11 +307,15 @@ func (rc *reconciler) mountAttachVolumes() {
 }
 
 func (rc *reconciler) unmountDetachDevices() {
+	// 遍历 actualStateOfWorld 所有 unmounted volume
 	for _, attachedVolume := range rc.actualStateOfWorld.GetUnmountedVolumes() {
+		// 检查 Volume 是否存在于 desiredStateOfWorld
 		// Check IsOperationPending to avoid marking a volume as detached if it's in the process of mounting.
 		if !rc.desiredStateOfWorld.VolumeExists(attachedVolume.VolumeName) &&
 			!rc.operationExecutor.IsOperationPending(attachedVolume.VolumeName, nestedpendingoperations.EmptyUniquePodName, nestedpendingoperations.EmptyNodeName) {
 			if attachedVolume.DeviceMayBeMounted() {
+				// 调用 Unmount Device
+
 				// Volume is globally mounted to device, unmount it
 				klog.V(5).InfoS(attachedVolume.GenerateMsgDetailed("Starting operationExecutor.UnmountDevice", ""))
 				err := rc.operationExecutor.UnmountDevice(
@@ -318,6 +337,8 @@ func (rc *reconciler) unmountDetachDevices() {
 					rc.actualStateOfWorld.MarkVolumeAsDetached(attachedVolume.VolumeName, attachedVolume.NodeName)
 					klog.InfoS(attachedVolume.GenerateMsgDetailed("Volume detached", fmt.Sprintf("DevicePath %q", attachedVolume.DevicePath)))
 				} else {
+					// 调用 Detach
+
 					// Only detach if kubelet detach is enabled
 					klog.V(5).InfoS(attachedVolume.GenerateMsgDetailed("Starting operationExecutor.DetachVolume", ""))
 					err := rc.operationExecutor.DetachVolume(

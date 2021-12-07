@@ -98,6 +98,7 @@ type reconciler struct {
 }
 
 func (rc *reconciler) Run(stopCh <-chan struct{}) {
+	// 周期性执行 reconcile
 	wait.Until(rc.reconciliationLoopFunc(), rc.loopPeriod, stopCh)
 }
 
@@ -138,10 +139,14 @@ func (rc *reconciler) reconcile() {
 	// Detaches are triggered before attaches so that volumes referenced by
 	// pods that are rescheduled to a different node are detached first.
 
+	// detach volume
 	// Ensure volumes that should be detached are detached.
 	for _, attachedVolume := range rc.actualStateOfWorld.GetAttachedVolumes() {
 		if !rc.desiredStateOfWorld.VolumeExists(
 			attachedVolume.VolumeName, attachedVolume.NodeName) {
+
+			// 如果 Attached Volume 存在于 actualStateOfWorld，但是不存在于 desiredStateOfWorld
+			// 表明 Volume 需要 detach
 
 			// Check whether there already exist an operation pending, and don't even
 			// try to start an operation if there is already one running.
@@ -162,6 +167,7 @@ func (rc *reconciler) reconcile() {
 				}
 			}
 
+			// 获取 attachState
 			// Because the detach operation updates the ActualStateOfWorld before
 			// marking itself complete, it's possible for the volume to be removed
 			// from the ActualStateOfWorld between the GetAttachedVolumes() check
@@ -171,12 +177,14 @@ func (rc *reconciler) reconcile() {
 			// See https://github.com/kubernetes/kubernetes/issues/93902
 			attachState := rc.actualStateOfWorld.GetAttachState(attachedVolume.VolumeName, attachedVolume.NodeName)
 			if attachState == cache.AttachStateDetached {
+				// 如果 attachState 已经是 Detached 了，跳过处理
 				if klog.V(5).Enabled() {
 					klog.Infof(attachedVolume.GenerateMsgDetailed("Volume detached--skipping", ""))
 				}
 				continue
 			}
 
+			// 设置 detach timeout
 			// Set the detach request time
 			elapsedTime, err := rc.actualStateOfWorld.SetDetachRequestTime(attachedVolume.VolumeName, attachedVolume.NodeName)
 			if err != nil {
@@ -191,6 +199,7 @@ func (rc *reconciler) reconcile() {
 				continue
 			}
 
+			// 将 Volume 标记为 detached
 			// Before triggering volume detach, mark volume as detached and update the node status
 			// If it fails to update node status, skip detach volume
 			err = rc.actualStateOfWorld.RemoveVolumeFromReportAsAttached(attachedVolume.VolumeName, attachedVolume.NodeName)
@@ -201,6 +210,7 @@ func (rc *reconciler) reconcile() {
 					err)
 			}
 
+			// 更新 Node Status
 			// Update Node Status to indicate volume is no longer safe to mount.
 			err = rc.nodeStatusUpdater.UpdateNodeStatuses()
 			if err != nil {
@@ -209,6 +219,7 @@ func (rc *reconciler) reconcile() {
 				continue
 			}
 
+			// 执行 detach Volume
 			// Trigger detach volume which requires verifying safe to detach step
 			// If timeout is true, skip verifySafeToDetach check
 			klog.V(5).Infof(attachedVolume.GenerateMsgDetailed("Starting attacherDetacher.DetachVolume", ""))
@@ -230,6 +241,7 @@ func (rc *reconciler) reconcile() {
 		}
 	}
 
+	// attach Volume
 	rc.attachDesiredVolumes()
 
 	// Update Node Status
@@ -242,6 +254,8 @@ func (rc *reconciler) reconcile() {
 func (rc *reconciler) attachDesiredVolumes() {
 	// Ensure volumes that should be attached are attached.
 	for _, volumeToAttach := range rc.desiredStateOfWorld.GetVolumesToAttach() {
+		// 遍历 desiredStateOfWorld
+
 		if util.IsMultiAttachAllowed(volumeToAttach.VolumeSpec) {
 			// Don't even try to start an operation if there is already one running for the given volume and node.
 			if rc.attacherDetacher.IsOperationPending(volumeToAttach.VolumeName, "" /* podName */, volumeToAttach.NodeName) {

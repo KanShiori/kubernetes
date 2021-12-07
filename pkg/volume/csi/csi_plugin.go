@@ -181,6 +181,7 @@ func (h *RegistrationHandler) DeRegisterPlugin(pluginName string) {
 	}
 }
 
+// Init 初始化 CSI VolumePlugin
 func (p *csiPlugin) Init(host volume.VolumeHost) error {
 	p.host = host
 
@@ -188,6 +189,7 @@ func (p *csiPlugin) Init(host volume.VolumeHost) error {
 	if csiClient == nil {
 		klog.Warning(log("kubeclient not set, assuming standalone kubelet"))
 	} else {
+		// 记录 CSIDriver Lister 与 VolumeAttachment Lister
 		// set CSIDriverLister and volumeAttachmentLister
 		adcHost, ok := host.(volume.AttachDetachVolumeHost)
 		if ok {
@@ -355,6 +357,7 @@ func (p *csiPlugin) RequiresRemount(spec *volume.Spec) bool {
 	return *csiDriver.Spec.RequiresRepublish
 }
 
+// NewMounter 新创建一个 Mounter 对象
 func (p *csiPlugin) NewMounter(
 	spec *volume.Spec,
 	pod *api.Pod,
@@ -391,6 +394,7 @@ func (p *csiPlugin) NewMounter(
 		return nil, err
 	}
 
+	// 确认 CSIDriver 是否支持 Volume LifecycleMode
 	// Check CSIDriver.Spec.Mode to ensure that the CSI driver
 	// supports the current volumeLifecycleMode.
 	if err := p.supportsVolumeLifecycleMode(driverName, volumeLifecycleMode); err != nil {
@@ -412,6 +416,7 @@ func (p *csiPlugin) NewMounter(
 		return nil, errors.New(log("cast from VolumeHost to KubeletVolumeHost failed"))
 	}
 
+	// 创建 Mounter
 	mounter := &csiMountMgr{
 		plugin:              p,
 		k8s:                 k8s,
@@ -594,6 +599,7 @@ func (p *csiPlugin) NewDetacher() (volume.Detacher, error) {
 	return p.newAttacherDetacher()
 }
 
+// CanAttach 判断 Volume 是否需要 Attach
 func (p *csiPlugin) CanAttach(spec *volume.Spec) (bool, error) {
 	inlineEnabled := utilfeature.DefaultFeatureGate.Enabled(features.CSIInlineVolume)
 	if inlineEnabled {
@@ -608,6 +614,7 @@ func (p *csiPlugin) CanAttach(spec *volume.Spec) (bool, error) {
 		}
 	}
 
+	// 取得 PV 定义与 CSI Driver name
 	pvSrc, err := getCSISourceFromSpec(spec)
 	if err != nil {
 		return false, err
@@ -615,6 +622,7 @@ func (p *csiPlugin) CanAttach(spec *volume.Spec) (bool, error) {
 
 	driverName := pvSrc.Driver
 
+	// 检查该 CSI Driver 是否需要 Attach
 	skipAttach, err := p.skipAttach(driverName)
 	if err != nil {
 		return false, err
@@ -797,6 +805,8 @@ func (p *csiPlugin) skipAttach(driver string) (bool, error) {
 	if p.csiDriverLister == nil {
 		return false, errors.New("CSIDriver lister does not exist")
 	}
+
+	// 得到对应的 CSIDriver 资源
 	csiDriver, err := p.csiDriverLister.Get(driver)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -805,6 +815,7 @@ func (p *csiPlugin) skipAttach(driver string) (bool, error) {
 		}
 		return false, err
 	}
+	// 通过 spec.attachRequired 判断是否需要 Attach
 	if csiDriver.Spec.AttachRequired != nil && *csiDriver.Spec.AttachRequired == false {
 		return true, nil
 	}

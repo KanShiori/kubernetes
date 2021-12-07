@@ -173,6 +173,7 @@ func (dswp *desiredStateOfWorldPopulator) findAndRemoveDeletedPods() {
 }
 
 func (dswp *desiredStateOfWorldPopulator) findAndAddActivePods() {
+	// 周期性处理 Pod
 	pods, err := dswp.podLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("podLister List failed: %v", err)

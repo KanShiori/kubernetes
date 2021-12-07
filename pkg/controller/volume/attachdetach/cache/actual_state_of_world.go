@@ -28,7 +28,7 @@ import (
 
 	"k8s.io/klog/v2"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util"
@@ -191,6 +191,7 @@ func NewActualStateOfWorld(volumePluginMgr *volume.VolumePluginMgr) ActualStateO
 }
 
 type actualStateOfWorld struct {
+	// attachedVolumes 记录 Pod/Volume 与 Volume 的关系
 	// attachedVolumes is a map containing the set of volumes the attach/detach
 	// controller believes to be successfully attached to the nodes it is
 	// managing. The key in this map is the name of the volume and the value is

@@ -459,6 +459,7 @@ type VolumeHost interface {
 	GetFilteredDialOptions() *proxyutil.FilteredDialOptions
 }
 
+// VolumePluginMgr 记录所有注册的插件
 // VolumePluginMgr tracks registered plugins.
 type VolumePluginMgr struct {
 	mutex                     sync.RWMutex
@@ -658,6 +659,7 @@ func (pm *VolumePluginMgr) initProbedPlugin(probedPlugin VolumePlugin) error {
 	return nil
 }
 
+// FindPluginBySpec 查找能够支持 spec 的 VolumePlugin
 // FindPluginBySpec looks for a plugin that can support a given volume
 // specification.  If no plugins can support or more than one plugin can
 // support it, return error.
@@ -669,6 +671,7 @@ func (pm *VolumePluginMgr) FindPluginBySpec(spec *Spec) (VolumePlugin, error) {
 		return nil, fmt.Errorf("could not find plugin because volume spec is nil")
 	}
 
+	// 调用静态注册的 VolumePlugin.CanSupport() 函数筛选
 	matches := []VolumePlugin{}
 	for _, v := range pm.plugins {
 		if v.CanSupport(spec) {
@@ -676,13 +679,17 @@ func (pm *VolumePluginMgr) FindPluginBySpec(spec *Spec) (VolumePlugin, error) {
 		}
 	}
 
+	// 进行一次 Probe Plugin
 	pm.refreshProbedPlugins()
+
+	// 调用动态注册的 VolumePlugin.CanSupport() 函数筛选
 	for _, plugin := range pm.probedPlugins {
 		if plugin.CanSupport(spec) {
 			matches = append(matches, plugin)
 		}
 	}
 
+	// 没有任何 VolumePlugin 或者多个 VolumePlugin 视为错误
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("no volume plugin matched")
 	}
@@ -694,28 +701,35 @@ func (pm *VolumePluginMgr) FindPluginBySpec(spec *Spec) (VolumePlugin, error) {
 		return nil, fmt.Errorf("multiple volume plugins matched: %s", strings.Join(matchedPluginNames, ","))
 	}
 
+	// 返回唯一的 VolumePlugin
 	// Issue warning if the matched provider is deprecated
 	pm.logDeprecation(matches[0].GetPluginName())
 	return matches[0], nil
 }
 
+// FindPluginByName 通过 plugin name 查找 Volume Plugin
 // FindPluginByName fetches a plugin by name or by legacy name.  If no plugin
 // is found, returns error.
 func (pm *VolumePluginMgr) FindPluginByName(name string) (VolumePlugin, error) {
 	pm.mutex.RLock()
 	defer pm.mutex.RUnlock()
 
+	// 查找静态注册的 VolumePlugin
 	// Once we can get rid of legacy names we can reduce this to a map lookup.
 	matches := []VolumePlugin{}
 	if v, found := pm.plugins[name]; found {
 		matches = append(matches, v)
 	}
 
+	// 进行一次 Probe Plugin
 	pm.refreshProbedPlugins()
+
+	// 查找动态注册的 VolumePlugin
 	if plugin, found := pm.probedPlugins[name]; found {
 		matches = append(matches, plugin)
 	}
 
+	// 没有任何 VolumePlugin 或者多个 VolumePlugin 视为错误
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("no volume plugin matched name: %s", name)
 	}
@@ -727,6 +741,7 @@ func (pm *VolumePluginMgr) FindPluginByName(name string) (VolumePlugin, error) {
 		return nil, fmt.Errorf("multiple volume plugins matched: %s", strings.Join(matchedPluginNames, ","))
 	}
 
+	// 返回唯一的 VolumePlugin
 	// Issue warning if the matched provider is deprecated
 	pm.logDeprecation(matches[0].GetPluginName())
 	return matches[0], nil

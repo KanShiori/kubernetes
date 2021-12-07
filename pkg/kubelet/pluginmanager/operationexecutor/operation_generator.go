@@ -77,7 +77,9 @@ func (og *operationGenerator) GenerateRegisterPluginFunc(
 	pluginHandlers map[string]cache.PluginHandler,
 	actualStateOfWorldUpdater ActualStateOfWorldUpdater) func() error {
 
+	// registerPluginFunc 注册一个 CSI Plugin
 	registerPluginFunc := func() error {
+		// gRPC 连接 socket 文件
 		client, conn, err := dial(socketPath, dialTimeoutDuration)
 		if err != nil {
 			return fmt.Errorf("RegisterPlugin error -- dial failed at socket %s, err: %v", socketPath, err)
@@ -87,11 +89,16 @@ func (og *operationGenerator) GenerateRegisterPluginFunc(
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 
+		// 调用 GetInfo 接口的插件的信息，包括
+		//  + Type: CSI 或者 Device
+		//	+ Name: 插件名字
+		//  + Endpoint: 插件接口访问地址
 		infoResp, err := client.GetInfo(ctx, &registerapi.InfoRequest{})
 		if err != nil {
 			return fmt.Errorf("RegisterPlugin error -- failed to get plugin info using RPC GetInfo at socket %s, err: %v", socketPath, err)
 		}
 
+		// 插件对应类型的 Handler
 		handler, ok := pluginHandlers[infoResp.Type]
 		if !ok {
 			if err := og.notifyPlugin(client, false, fmt.Sprintf("RegisterPlugin error -- no handler registered for plugin type: %s at socket %s", infoResp.Type, socketPath)); err != nil {
@@ -103,6 +110,8 @@ func (og *operationGenerator) GenerateRegisterPluginFunc(
 		if infoResp.Endpoint == "" {
 			infoResp.Endpoint = socketPath
 		}
+
+		// 调用 Handler 回调注册，也保存到 plugin manager
 		if err := handler.ValidatePlugin(infoResp.Name, infoResp.Endpoint, infoResp.SupportedVersions); err != nil {
 			if err = og.notifyPlugin(client, false, fmt.Sprintf("RegisterPlugin error -- plugin validation failed with err: %v", err)); err != nil {
 				return fmt.Errorf("RegisterPlugin error -- failed to send error at socket %s, err: %v", socketPath, err)
@@ -124,6 +133,7 @@ func (og *operationGenerator) GenerateRegisterPluginFunc(
 			return og.notifyPlugin(client, false, fmt.Sprintf("RegisterPlugin error -- plugin registration failed with err: %v", err))
 		}
 
+		// 回调通知插件注册状态
 		// Notify is called after register to guarantee that even if notify throws an error Register will always be called after validate
 		if err := og.notifyPlugin(client, true, ""); err != nil {
 			return fmt.Errorf("RegisterPlugin error -- failed to send registration status at socket %s, err: %v", socketPath, err)

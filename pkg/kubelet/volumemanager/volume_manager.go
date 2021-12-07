@@ -91,13 +91,16 @@ const (
 	waitForAttachTimeout = 10 * time.Minute
 )
 
+// VolumeManager 执行异步操作去 attached/mounted/unmounted/detached volume
 // VolumeManager runs a set of asynchronous loops that figure out which volumes
 // need to be attached/mounted/unmounted/detached based on the pods scheduled on
 // this node and makes it so.
 type VolumeManager interface {
+	// Run 运行 manager
 	// Starts the volume manager and all the asynchronous loops that it controls
 	Run(sourcesReady config.SourcesReady, stopCh <-chan struct{})
 
+	// WaitForAttachAndMount 进行 volume 的 attach/mount
 	// WaitForAttachAndMount processes the volumes referenced in the specified
 	// pod and blocks until they are all attached and mounted (reflected in
 	// actual state of the world).
@@ -281,13 +284,16 @@ func (vm *volumeManager) Run(sourcesReady config.SourcesReady, stopCh <-chan str
 	defer runtime.HandleCrash()
 
 	if vm.kubeClient != nil {
+		// 运行 volume plugin manager
 		// start informer for CSIDriver
 		go vm.volumePluginMgr.Run(stopCh)
 	}
 
+	// 周期性填充 desiredStateOfWorld
 	go vm.desiredStateOfWorldPopulator.Run(sourcesReady, stopCh)
 	klog.V(2).InfoS("The desired_state_of_world populator starts")
 
+	// 运行 reconciler
 	klog.InfoS("Starting Kubelet Volume Manager")
 	go vm.reconciler.Run(stopCh)
 

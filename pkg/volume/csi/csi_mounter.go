@@ -107,6 +107,7 @@ func (c *csiMountMgr) SetUp(mounterArgs volume.MounterArgs) error {
 func (c *csiMountMgr) SetUpAt(dir string, mounterArgs volume.MounterArgs) error {
 	klog.V(4).Infof(log("Mounter.SetUpAt(%s)", dir))
 
+	// 得到 CSI Node
 	csi, err := c.csiClientGetter.Get()
 	if err != nil {
 		return volumetypes.NewTransientOperationFailure(log("mounter.SetUpAt failed to get CSI client: %v", err))
@@ -202,6 +203,7 @@ func (c *csiMountMgr) SetUpAt(dir string, mounterArgs volume.MounterArgs) error 
 		return fmt.Errorf("volume source not found in volume.Spec")
 	}
 
+	// 创建 Pod 的目录
 	// create target_dir before call to NodePublish
 	parentDir := filepath.Dir(dir)
 	if err := os.MkdirAll(parentDir, 0750); err != nil {
@@ -209,6 +211,7 @@ func (c *csiMountMgr) SetUpAt(dir string, mounterArgs volume.MounterArgs) error 
 	}
 	klog.V(4).Info(log("created target path successfully [%s]", parentDir))
 
+	// 读取 Secret
 	nodePublishSecrets = map[string]string{}
 	if secretRef != nil {
 		nodePublishSecrets, err = getCredentialsFromSecret(c.k8s, secretRef)
@@ -219,6 +222,7 @@ func (c *csiMountMgr) SetUpAt(dir string, mounterArgs volume.MounterArgs) error 
 
 	}
 
+	// CSI Driver 的 `podInfoOnMount` 功能实现
 	// Inject pod information into volume_attributes
 	podInfoEnabled, err := c.plugin.podInfoEnabled(string(c.driverName))
 	if err != nil {
@@ -228,6 +232,7 @@ func (c *csiMountMgr) SetUpAt(dir string, mounterArgs volume.MounterArgs) error 
 		volAttribs = mergeMap(volAttribs, getPodInfoAttrs(c.pod, c.volumeLifecycleMode))
 	}
 
+	// CSI Driver 的 `tokenRequest` 功能实现
 	// Inject pod service account token into volume attributes
 	serviceAccountTokenAttrs, err := c.podServiceAccountTokenAttrs()
 	if err != nil {
@@ -235,6 +240,7 @@ func (c *csiMountMgr) SetUpAt(dir string, mounterArgs volume.MounterArgs) error 
 	}
 	volAttribs = mergeMap(volAttribs, serviceAccountTokenAttrs)
 
+	// CSI Driver 的 `fsGroupPolicy` 功能实现
 	driverSupportsCSIVolumeMountGroup := false
 	var nodePublishFSGroupArg *int64
 	if utilfeature.DefaultFeatureGate.Enabled(features.DelegateFSGroupToCSIDriver) {
@@ -249,6 +255,7 @@ func (c *csiMountMgr) SetUpAt(dir string, mounterArgs volume.MounterArgs) error 
 		}
 	}
 
+	// 调用 CSI Node 接口
 	err = csi.NodePublishVolume(
 		ctx,
 		volumeHandle,

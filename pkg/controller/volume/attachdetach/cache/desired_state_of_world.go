@@ -25,7 +25,7 @@ import (
 	"fmt"
 	"sync"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util"
@@ -138,6 +138,7 @@ func NewDesiredStateOfWorld(volumePluginMgr *volume.VolumePluginMgr) DesiredStat
 }
 
 type desiredStateOfWorld struct {
+	// nodesManaged 记录管理的 Node
 	// nodesManaged is a map containing the set of nodes managed by the attach/
 	// detach controller. The key in this map is the name of the node and the
 	// value is a node object containing more information about the node.
